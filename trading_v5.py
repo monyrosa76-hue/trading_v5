@@ -28,6 +28,15 @@
       D1H4H1   : bias D1, livelli H4, ingresso H1   (storia limitata dall'H1)
       H4H1M15  : bias H4, livelli H1, ingresso M15  (la configurazione v4)
 
+ MODIFICHE v5.2 (05/11/2026)
+   - Universo completo reintegrato: 13 forex, oro, DAX, 15 azioni USA, ASML e SAP,
+     8 azioni asiatiche. Il backtest usa TUTTI gli strumenti (prima solo forex + oro).
+     Gli strumenti non coperti dal piano Twelvedata compaiono come "NON UTILIZZABILE".
+   - Nuovo primo foglio "Esito": quali preset / classi / strumenti superano le 4
+     condizioni di validazione, con colori e i casi "vicini" (3 condizioni su 4).
+   - Cache: ordinamento stabile, la candela appena scaricata sostituisce sempre quella vecchia.
+   - Foglio "Per fascia Fibonacci": colonna rinominata da "_b" a "Fascia Fibonacci".
+
  MODIFICHE v5.1 (05/11/2026, dopo il primo backtest reale)
    - Dati: una candela OHLC incoerente veniva scartata insieme a TUTTA la serie
      (USD/JPY e USD/CHF 1day persi). Ora si scarta solo la candela; il numero
@@ -171,16 +180,44 @@ INSTRUMENTS.update({p: (p, None, "fx_cross", "fx") for p in FX_CRS})
 INSTRUMENTS.update({
     "Oro (XAU/USD)":       ("XAU/USD", None,   "metal",    "fx"),
     "DAX 40":              ("DAX",     None,   "index",    "europe"),
-    "Apple (AAPL)":        ("AAPL",  "NASDAQ", "stock_us", "us"),
-    "Microsoft (MSFT)":    ("MSFT",  "NASDAQ", "stock_us", "us"),
-    "NVIDIA (NVDA)":       ("NVDA",  "NASDAQ", "stock_us", "us"),
-    "Amazon (AMZN)":       ("AMZN",  "NASDAQ", "stock_us", "us"),
-    "Alphabet (GOOGL)":    ("GOOGL", "NASDAQ", "stock_us", "us"),
-    "JPMorgan (JPM)":      ("JPM",   "NYSE",   "stock_us", "us"),
-    "Coca-Cola (KO)":      ("KO",    "NYSE",   "stock_us", "us"),
-    "Berkshire B (BRK.B)": ("BRK.B", "NYSE",   "stock_us", "us"),
+    # ---- AZIONI US ----
+    "Apple (AAPL)":          ("AAPL",  "NASDAQ", "stock_us", "us"),
+    "Microsoft (MSFT)":      ("MSFT",  "NASDAQ", "stock_us", "us"),
+    "NVIDIA (NVDA)":         ("NVDA",  "NASDAQ", "stock_us", "us"),
+    "Tesla (TSLA)":          ("TSLA",  "NASDAQ", "stock_us", "us"),
+    "Amazon (AMZN)":         ("AMZN",  "NASDAQ", "stock_us", "us"),
+    "Meta (META)":           ("META",  "NASDAQ", "stock_us", "us"),
+    "Alphabet (GOOGL)":      ("GOOGL", "NASDAQ", "stock_us", "us"),
+    "Bank of America (BAC)": ("BAC",   "NYSE",   "stock_us", "us"),
+    "Intel (INTC)":          ("INTC",  "NASDAQ", "stock_us", "us"),
+    "JPMorgan (JPM)":        ("JPM",   "NYSE",   "stock_us", "us"),
+    "Visa (V)":              ("V",     "NYSE",   "stock_us", "us"),
+    "Mastercard (MA)":       ("MA",    "NYSE",   "stock_us", "us"),
+    "P&G (PG)":              ("PG",    "NYSE",   "stock_us", "us"),
+    "Coca-Cola (KO)":        ("KO",    "NYSE",   "stock_us", "us"),
+    "Berkshire B (BRK.B)":   ("BRK.B", "NYSE",   "stock_us", "us"),
+    # ---- AZIONI EU quotate negli USA (orari di borsa USA) ----
+    "ASML":                  ("ASML",  "NASDAQ", "stock_eu", "us"),
+    "SAP":                   ("SAP",   "NYSE",   "stock_eu", "us"),
+    # ---- AZIONI ASIATICHE [copertura del piano free DA VERIFICARE: vedi foglio "Dati caricati"] ----
+    "Mitsubishi UFJ (8306)": ("8306",   "TSE",  "stock_asia", "tokyo"),
+    "SoftBank (9984)":       ("9984",   "TSE",  "stock_asia", "tokyo"),
+    "Toyota (7203)":         ("7203",   "TSE",  "stock_asia", "tokyo"),
+    "Bank of China (3988)":  ("3988",   "HKEX", "stock_asia", "tokyo"),
+    "Sony (6758)":           ("6758",   "TSE",  "stock_asia", "tokyo"),
+    "Alibaba (9988)":        ("9988",   "HKEX", "stock_asia", "tokyo"),
+    "Tencent (0700)":        ("700",    "HKEX", "stock_asia", "tokyo"),
+    "BYD (002594)":          ("002594", "SZSE", "stock_asia", "tokyo"),
 })
-BACKTEST_SYMBOLS = FX_MAJ + FX_CRS + ["Oro (XAU/USD)"]
+# Il backtest usa TUTTI gli strumenti (v5.2). Quelli non coperti dal piano risultano
+# "NON UTILIZZABILE" nel foglio "Dati caricati" e vengono saltati.
+BACKTEST_SYMBOLS = list(INSTRUMENTS)
+
+CLASS_LABEL = {"fx_major": "Forex major", "fx_cross": "Forex cross", "metal": "Oro",
+               "index": "Indici", "stock_us": "Azioni USA", "stock_eu": "Azioni EU (quotate USA)",
+               "stock_asia": "Azioni Asia"}
+# controllo casuale di riferimento per ogni set di timeframe
+RANDOM_OF_SET = {"D1H4H1": "controllo_casuale", "H4H1M15": "controllo_casuale_H4H1M15"}
 
 SESSIONS = {"tokyo": (2, 9), "europe": (9, 17.5), "us": (15.5, 22)}
 BASE_URL = "https://api.twelvedata.com/time_series"
@@ -279,7 +316,9 @@ def load_series(name, interval, bars, api_key, cache_dir, now_utc):
     parts = [d for d in (old, new) if d is not None and not d.empty]
     if not parts:
         return None, msg
-    df = pd.concat(parts, ignore_index=True).sort_values("time")
+    # ordinamento STABILE: a parità di orario resta l'ordine cache -> nuovo,
+    # così keep="last" tiene sempre la candela appena scaricata
+    df = pd.concat(parts, ignore_index=True).sort_values("time", kind="stable")
     df = df.drop_duplicates("time", keep="last").reset_index(drop=True)
     df, bad_times = clean_ohlc(df)
     if bad_times:
@@ -799,9 +838,138 @@ def bucket_table(df, col, bins=None, labels=None):
     d = df.copy()
     key = col
     if bins is not None:
-        d["_b"] = pd.cut(d[col], bins=bins, labels=labels); key = "_b"
+        key = "Fascia Fibonacci" if col == "Ritracciamento %" else f"Fascia {col}"
+        d[key] = pd.cut(d[col], bins=bins, labels=labels)
     g = d.groupby(["Preset", key], observed=True).R.agg(["count", "mean", "sum"]).round(3)
     return g.rename(columns={"count": "Trade", "mean": "R medio", "sum": "R totale"})
+
+def _exp(tr):
+    return round(float(np.mean([t["R"] for t in tr])), 3) if tr else None
+
+def build_esito(all_tr, cuts):
+    """Foglio 'Esito': per preset, classe e strumento verifica le 4 condizioni di validazione.
+    1) trade >= MIN_TRADES_OK   2) expectancy > 0 (già al netto dei costi)
+    3) expectancy > controllo casuale dello stesso set, sullo stesso ambito
+    4) expectancy out-of-sample > 0 (stesso taglio temporale usato nel Riepilogo)"""
+    rows = []
+    by_p = {}
+    for t in all_tr:
+        by_p.setdefault(t["Preset"], []).append(t)
+    for preset in BACKTEST_PRESETS:          # anche i preset senza trade compaiono
+        tr = by_p.get(preset, [])
+        tfset = PRESET_DEFS[preset][0]
+        rnd = RANDOM_OF_SET.get(tfset)
+        if PRESET_DEFS[preset][1] == "random":
+            continue                         # i controlli sono il metro, non si validano
+        rtr = by_p.get(rnd, [])
+        cut = cuts.get(preset)
+        scopes = [("1 Preset (tutti gli strumenti)", "Tutti gli strumenti", lambda t: True)]
+        for cls in dict.fromkeys(INSTRUMENTS[t["Strumento"]][2] for t in tr):
+            scopes.append(("2 Classe", CLASS_LABEL.get(cls, cls),
+                           lambda t, c=cls: INSTRUMENTS[t["Strumento"]][2] == c))
+        for name in sorted({t["Strumento"] for t in tr}):
+            scopes.append(("3 Strumento", name, lambda t, n=name: t["Strumento"] == n))
+        for level, scope, f in scopes:
+            sub = [t for t in tr if f(t)]
+            rsub = [t for t in rtr if f(t)]
+            oos = [t for t in sub if cut is not None and pd.Timestamp(t["_t_in"]) > cut]
+            e, er, eo = _exp(sub), _exp(rsub), _exp(oos)
+            c1 = len(sub) >= MIN_TRADES_OK
+            c2 = e is not None and e > 0
+            c3 = e is not None and er is not None and e > er
+            c4 = eo is not None and eo > 0
+            n_ok = sum((c1, c2, c3, c4))
+            se = (round(float(np.std([t["R"] for t in sub], ddof=1) / np.sqrt(len(sub))), 3)
+                  if len(sub) > 1 else None)
+            rows.append({
+                "Livello": level, "Preset": preset, "Set timeframe": tfset, "Ambito": scope,
+                "Trade": len(sub), "Expectancy R": e, "Errore std R": se,
+                "Controllo casuale R": er, "Trade controllo": len(rsub),
+                "Differenza vs casuale R": round(e - er, 3) if e is not None and er is not None else None,
+                "OOS expectancy R": eo, "OOS trade": len(oos),
+                f"1) >= {MIN_TRADES_OK} trade": "SÌ" if c1 else "NO",
+                "2) expectancy > 0": "SÌ" if c2 else "NO",
+                "3) batte il casuale": "SÌ" if c3 else ("n.d." if er is None else "NO"),
+                "4) regge OOS": "SÌ" if c4 else "NO",
+                "Condizioni superate": f"{n_ok}/4",
+                "ESITO": "SUPERA" if n_ok == 4 else "non supera"})
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["_ord"] = (df.ESITO != "SUPERA").astype(int)
+    df = df.sort_values(["Livello", "_ord", "Preset", "Expectancy R"],
+                        ascending=[True, True, True, False]).drop(columns="_ord")
+    return df.reset_index(drop=True)
+
+def write_esito_sheet(xw, esito, dataload, run_info):
+    """Primo foglio del report: verdetto in alto, poi tabella completa con colori."""
+    from openpyxl.styles import Font, PatternFill, Alignment
+    ws = xw.book.create_sheet("Esito", 0)
+    green, red, grey = (PatternFill("solid", fgColor=c) for c in ("C6EFCE", "FFC7CE", "EDEDED"))
+    bold = Font(bold=True)
+    ws["A1"] = "ESITO DEL BACKTEST v5"; ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"] = run_info
+    ws["A3"] = (f"Un prodotto SUPERA solo se: 1) almeno {MIN_TRADES_OK} trade, 2) expectancy > 0 dopo i costi, "
+                "3) batte il controllo casuale del suo set sullo stesso ambito, 4) expectancy > 0 nell'ultimo 30% "
+                "(out-of-sample).")
+    n_ok_data = sum(1 for d in dataload if d.get("Candele", 0) > 0 and "NON" not in str(d.get("Messaggio", "")))
+    ws["A4"] = f"Serie dati caricate: {n_ok_data} su {len(dataload)} (dettaglio nel foglio 'Dati caricati')."
+    passed = esito[esito.ESITO == "SUPERA"] if not esito.empty else esito
+    r = 6
+    ws.cell(r, 1, "PRODOTTI CHE SUPERANO TUTTE LE ANALISI").font = Font(bold=True, size=12)
+    r += 1
+    if passed.empty:
+        c = ws.cell(r, 1, "NESSUNO. Nessun preset, classe o strumento soddisfa le 4 condizioni: "
+                          "non operare sulla base di questo backtest.")
+        c.font = bold; c.fill = red
+        r += 1
+    else:
+        for _, p in passed.iterrows():
+            c = ws.cell(r, 1, f"{p['Ambito']}  |  preset {p['Preset']}  |  {p['Trade']} trade  |  "
+                              f"expectancy {p['Expectancy R']}R (casuale {p['Controllo casuale R']}R)  |  "
+                              f"OOS {p['OOS expectancy R']}R su {p['OOS trade']} trade")
+            c.font = bold; c.fill = green
+            r += 1
+    # i più vicini: 3/4 condizioni, ma solo con un campione non ridicolo
+    near = (esito[(esito["Condizioni superate"] == "3/4") & (esito.Trade >= MIN_TRADES_NOISE)]
+            if not esito.empty else esito)
+    r += 1
+    ws.cell(r, 1, f"VICINI ALLA VALIDAZIONE (3 condizioni su 4, almeno {MIN_TRADES_NOISE} trade)"
+            ).font = Font(bold=True, size=12)
+    r += 1
+    if near.empty:
+        ws.cell(r, 1, "nessuno"); r += 1
+    else:
+        for _, p in near.head(15).iterrows():
+            manca = [k for k in ("1)", "2)", "3)", "4)")
+                     for col in esito.columns if col.startswith(k) and p[col] != "SÌ"]
+            ws.cell(r, 1, f"{p['Ambito']}  |  preset {p['Preset']}  |  {p['Trade']} trade  |  "
+                          f"expectancy {p['Expectancy R']}R  |  manca la condizione {', '.join(manca)}").fill = grey
+            r += 1
+    r += 1
+    ws.cell(r, 1, "TABELLA COMPLETA (livello 1 = preset, 2 = classe di prodotto, 3 = singolo strumento)"
+            ).font = Font(bold=True, size=12)
+    r += 1
+    if esito.empty:
+        ws.cell(r, 1, "nessun trade prodotto"); return
+    head = r
+    for j, col in enumerate(esito.columns, 1):
+        c = ws.cell(head, j, col); c.font = bold; c.alignment = Alignment(wrap_text=True)
+    cond_cols = [j for j, col in enumerate(esito.columns, 1) if col[:2] in ("1)", "2)", "3)", "4)")]
+    esito_col = list(esito.columns).index("ESITO") + 1
+    for i, row in enumerate(esito.itertuples(index=False), head + 1):
+        for j, v in enumerate(row, 1):
+            ws.cell(i, j, v)
+        for j in cond_cols:
+            v = ws.cell(i, j).value
+            ws.cell(i, j).fill = green if v == "SÌ" else (red if v == "NO" else grey)
+        ws.cell(i, esito_col).fill = green if ws.cell(i, esito_col).value == "SUPERA" else red
+        ws.cell(i, esito_col).font = bold
+    ws.freeze_panes = ws.cell(head + 1, 1)
+    widths = {1: 30, 2: 26, 3: 10, 4: 26}
+    for j in range(1, len(esito.columns) + 1):
+        ws.column_dimensions[ws.cell(head, j).column_letter].width = widths.get(j, 13)
+    ws.row_dimensions[head].height = 45
 
 pre_b, pre_l = {}, {}   # cache dei precalcoli per strumento (riusata tra i preset)
 
@@ -843,7 +1011,7 @@ def run_backtest(api_key, out_dir):
             "Controlla il foglio/log 'Dati caricati' e il messaggio di ciascun timeframe.")
 
     # precalcolo per i preset non-v3 (una volta per strumento e per set di timeframe)
-    all_tr, summary, gate_rows = [], [], []
+    all_tr, summary, gate_rows, cuts = [], [], [], {}
     for preset in BACKTEST_PRESETS:
         tfset_name, mode, over = PRESET_DEFS[preset]
         TF = TF_SETS[tfset_name]; P = dict(PARAMS, **over)
@@ -871,6 +1039,7 @@ def run_backtest(api_key, out_dir):
         if tr:
             t0 = min(pd.Timestamp(t["_t_in"]) for t in tr); t1 = max(pd.Timestamp(t["_t_out"]) for t in tr)
             cut = t0 + (t1 - t0) * OOS_SPLIT
+            cuts[preset] = cut
             tis = [t for t in tr if pd.Timestamp(t["_t_in"]) <= cut]
             toos = [t for t in tr if pd.Timestamp(t["_t_in"]) > cut]
         else:
@@ -887,6 +1056,11 @@ def run_backtest(api_key, out_dir):
         log(f"    trade {s0['Trade']} | R medio {s0.get('R medio (expectancy)')} | "
             f"R totale {s0.get('R totale')} | {s0['Giudizio']}")
 
+    esito = build_esito(all_tr, cuts)
+    if not esito.empty:
+        sup = esito[esito.ESITO == "SUPERA"]
+        log("\nESITO: " + ("nessun prodotto supera le 4 condizioni" if sup.empty else
+                            "superano -> " + "; ".join(f"{a} [{b}]" for a, b in zip(sup.Ambito, sup.Preset))))
     df_tr = pd.DataFrame(all_tr)
     sm = pd.DataFrame(summary)
     cols = ["Preset", "Periodo", "Trade", "Dal", "Al", "Trade/mese", "Vincenti %", "Win rate di pareggio %",
@@ -919,6 +1093,9 @@ def run_backtest(api_key, out_dir):
         "Spread: stime in SPREAD_PCT, da verificare sulla piattaforma. Nessuno slippage oltre ai gap.",
         "Candela con stop e target nella stessa barra = conteggiata come stop (prudente).",
         "La cache in cache/ si allunga a ogni esecuzione: rilanciare periodicamente aumenta la storia.",
+        "Foglio 'Esito' (il primo): verdetto per preset, per classe di prodotto e per singolo strumento "
+        "sulle 4 condizioni. Il livello 'Strumento' ha campioni piccoli: con molti strumenti è facile che "
+        "uno superi per caso, quindi va confermato nei run successivi prima di operarlo.",
     ]})
     ts = datetime.now().strftime("%Y%m%d_%H%M")
     path = os.path.join(out_dir, f"Backtest_v5_{ts}.xlsx")
@@ -936,7 +1113,13 @@ def run_backtest(api_key, out_dir):
             df_tr.drop(columns=["_t_in", "_t_out"]).to_excel(xw, sheet_name="Trade", index=False)
         pd.DataFrame(gate_rows).to_excel(xw, sheet_name="Motivi di scarto", index=False)
         note.to_excel(xw, sheet_name="Come leggere", index=False)
+        write_esito_sheet(xw, esito, dataload,
+                          f"Generato il {datetime.now():%d/%m/%Y %H:%M} | preset: {len(BACKTEST_PRESETS)} | "
+                          f"strumenti con dati: {len(data)} su {len(BACKTEST_SYMBOLS)}")
+        xw.book.active = 0
         for ws in xw.book.worksheets:
+            if ws.title == "Esito":
+                continue
             ws.freeze_panes = "A2"
             for col in ws.columns:
                 ws.column_dimensions[col[0].column_letter].width = min(

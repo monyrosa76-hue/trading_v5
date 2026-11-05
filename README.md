@@ -34,12 +34,32 @@ il `.yml` inizia con `# .github/workflows/trading_v5.yml`.
 5. **Permessi Actions**: Settings -> Actions -> General -> *Allow all actions*;
    in *Workflow permissions* scegli **Read and write permissions** (serve per le Release).
 
+## Strumenti (40)
+
+- Forex: 5 major + 8 cross · Oro (XAU/USD) · DAX 40
+- Azioni USA (15): AAPL, MSFT, NVDA, TSLA, AMZN, META, GOOGL, BAC, INTC, JPM, V, MA, PG, KO, BRK.B
+- Azioni EU quotate negli USA: ASML, SAP
+- Azioni Asia (8): 8306, 9984, 7203, 6758 (TSE), 3988, 9988, 700 (HKEX), 002594 (SZSE) —
+  copertura del piano free da verificare nel foglio "Dati caricati"
+
+Consumo API: 160 chiamate per backtest. Limite del piano basic: 800 al giorno
+(verificato con `/api_usage`).
+
+## Il report Excel
+
+Il primo foglio, **Esito**, dice quali prodotti superano le 4 condizioni, a tre livelli:
+1) preset su tutti gli strumenti, 2) classe di prodotto (es. Azioni USA), 3) singolo
+strumento. Sotto, i casi "vicini" (3 condizioni su 4) e la tabella completa a colori.
+Il livello "singolo strumento" ha campioni piccoli: un risultato positivo va confermato
+nei run successivi prima di operarlo.
+
 ## Primo avvio e verifica
 
 Actions -> **Trading v5** -> *Run workflow* -> mode `backtest` -> Run.
 
 Un run sano:
-- dura **diversi minuti** (≈14 strumenti × 4 timeframe × 8 s di pausa tra chiamate);
+- dura **circa 25 minuti** (40 strumenti × 4 timeframe = 160 chiamate, 8 s di pausa tra
+  una chiamata e l'altra, più il calcolo);
 - nel log dello step *Esegui* mostra `Chiave API: presente`, poi
   `Preset: D1H4H1_zone, ...` e `Timeframe da scaricare: 1day, 4h, 1h, 15min` (righe NON vuote),
   poi una riga per strumento/timeframe con numero di candele e date;
@@ -53,6 +73,7 @@ Diagnosi rapida:
 | Fallisce in pochi secondi allo step "Verifica il secret" | secret assente, con nome diverso o messo in *Variables* |
 | `Preset:` vuoto nel log | script vecchio (bug variabile vuota, corretto in questa versione) |
 | `NON UTILIZZABILE` su tutti gli strumenti | chiave non valida, crediti API esauriti, simboli non coperti dal piano |
+| `NON UTILIZZABILE` solo su alcuni strumenti (es. azioni asiatiche) | simbolo non coperto dal piano free: viene saltato, il resto del backtest è valido |
 | Fallisce allo step "Pubblica Release" | manca *Read and write permissions* (punto 5) |
 | `file in cache: 0` a ogni run | normale al primo avvio; poi la cache scade se non usata per 7 giorni |
 
