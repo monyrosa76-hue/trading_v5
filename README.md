@@ -66,7 +66,13 @@ Diagnosi rapida:
 | presets | vuoto = tutti | es. `D1H4H1_zone,controllo_casuale` |
 | pubblica_release | sì/no | report anche come Release |
 
-Pianificazione: backtest automatico il giorno 1 di ogni mese alle 05:00 UTC.
+Pianificazione:
+- giorno 1 di ogni mese alle 05:00 UTC: backtest **con Release**;
+- lunedì e giovedì alle 04:00 UTC: backtest **senza Release** (solo artifact), serve a tenere
+  viva la cache e ad allungare la storia.
+
+Preset di controllo: `controllo_casuale` (set D1H4H1) e `controllo_casuale_H4H1M15`.
+Ogni preset va confrontato con il controllo del **proprio** set di timeframe.
 
 ## Pubblico o privato
 
@@ -81,14 +87,26 @@ Pianificazione: backtest automatico il giorno 1 di ogni mese alle 05:00 UTC.
 
 `TRADING_V5/cache` viene conservata tra i run da `actions/cache`. Ogni run unisce le nuove
 candele a quelle vecchie, quindi la storia si allunga nel tempo. GitHub elimina le cache
-non usate per 7 giorni: con il solo run mensile la storia NON si accumula. Per farla
-crescere servono run almeno settimanali (aggiungere un secondo `cron` settimanale).
+non usate per 7 giorni [DA VERIFICARE sulla documentazione GitHub]: per questo ci sono i
+run del lunedì e del giovedì (intervallo massimo 4 giorni).
+
+Attenzione: GitHub disattiva i workflow pianificati dopo 60 giorni senza attività nel
+repository (commit). Se succede, Actions mostra un avviso: basta riattivarli.
+[DA VERIFICARE se i run pianificati contano come attività]
+
+Storia disponibile al primo avvio (5000 candele): D1 ≈ 18 anni, H4 ≈ 22 mesi,
+H1 ≈ 7 mesi, M15 ≈ 52 giorni. La storia utile di un set è quella del suo timeframe
+d'ingresso (H1 per D1H4H1, M15 per H4H1M15).
+
+Candele con prezzi incoerenti (es. high < low): viene scartata solo la candela, non tutta
+la serie. Il foglio "Dati caricati" ne riporta il numero nella colonna Messaggio.
 
 ## Le 4 condizioni per usare un preset
 
 1. almeno **100 trade** nel backtest;
 2. **expectancy > 0** dopo i costi;
-3. batte il preset **controllo_casuale**;
+3. batte il **controllo casuale del proprio set** (`controllo_casuale` per D1H4H1,
+   `controllo_casuale_H4H1M15` per H4H1M15);
 4. regge sulla parte **out-of-sample** (ultimo 30% del periodo).
 
 Se nessun preset le soddisfa: nessun trading reale con questa strategia.

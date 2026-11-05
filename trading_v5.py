@@ -23,10 +23,23 @@
 
  In più, il limite dei dati: con il piano free si scaricano 5000 candele per
  timeframe, quindi la storia disponibile dipende dalla candela d'INGRESSO:
-      M15 -> ~52 giorni | H1 -> ~9 mesi | H4 -> ~3 anni
+      M15 -> ~52 giorni | H1 -> ~7 mesi | H4 -> ~22 mesi | D1 -> ~18 anni
  Per questo la v5 gestisce due set di timeframe con la stessa logica:
-      D1H4H1   : bias D1, livelli H4, ingresso H1   (storia lunga, consigliato)
+      D1H4H1   : bias D1, livelli H4, ingresso H1   (storia limitata dall'H1)
       H4H1M15  : bias H4, livelli H1, ingresso M15  (la configurazione v4)
+
+ MODIFICHE v5.1 (05/11/2026, dopo il primo backtest reale)
+   - Dati: una candela OHLC incoerente veniva scartata insieme a TUTTA la serie
+     (USD/JPY e USD/CHF 1day persi). Ora si scarta solo la candela; il numero
+     e la data compaiono nel foglio "Dati caricati" (colonna Messaggio).
+   - Controllo casuale: aggiunto "controllo_casuale_H4H1M15" (prima esisteva
+     solo per D1H4H1, quindi non era un metro omogeneo per i preset H4H1M15).
+   - Controllo casuale: seme fisso per strumento (zlib.crc32). Prima usava
+     hash(), che in Python cambia a ogni esecuzione: risultati non ripetibili.
+   - Controllo casuale: senza filtro di esposizione e 100 ingressi per strumento.
+     Serve a stimare l'expectancy per trade di un ingresso casuale; il filtro
+     di esposizione ne lasciava 48 su ~480 e non c'entra con la qualità
+     dell'ingresso. Il foglio Riepilogo mostra i trade prima del filtro.
 
  CONTROLLI ANTI-ILLUSIONE (nuovi)
    - Divisione del periodo: primi 70% (IS) / ultimi 30% (OOS). Se il risultato
@@ -52,7 +65,7 @@
 ===============================================================================
 """
 
-import os, sys, time, math, re, json, warnings
+import os, sys, time, math, re, json, warnings, zlib
 from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
@@ -126,20 +139,22 @@ PRESET_DEFS = {
     "H4H1M15_pinbar":   ("H4H1M15", "pinbar",   dict(rsi_entry_filter=True, pin_min_atr=0.8)),
     "v3_originale":        ("H4H1M15", "v3", dict(weekend_filter=False, exposure_filter=False)),
     "v3_con_filtro_weekend": ("H4H1M15", "v3", dict(weekend_filter=True, exposure_filter=False)),
-    "controllo_casuale":   ("D1H4H1", "random", {}),
+    # controllo casuale: senza filtro esposizione (vedi MODIFICHE v5.1 in testa al file)
+    "controllo_casuale":         ("D1H4H1",  "random", dict(exposure_filter=False)),
+    "controllo_casuale_H4H1M15": ("H4H1M15", "random", dict(exposure_filter=False)),
 }
 # NB: "or" (non il default di .get) perche' GitHub Actions passa la variabile VUOTA
 # quando l'input "presets" non e' compilato (run pianificati): con .get(.., default)
 # la lista risultava vuota e il backtest non scaricava nulla.
 _BACKTEST_PRESETS_DEFAULT = ("D1H4H1_zone,D1H4H1_reversal,D1H4H1_pinbar,H4H1M15_zone,H4H1M15_reversal,"
-                             "v3_originale,v3_con_filtro_weekend,controllo_casuale")
+                             "v3_originale,v3_con_filtro_weekend,controllo_casuale,controllo_casuale_H4H1M15")
 BACKTEST_PRESETS = [p.strip() for p in
                     (os.environ.get("BACKTEST_PRESETS", "").strip() or _BACKTEST_PRESETS_DEFAULT).split(",")
                     if p.strip()]
 _ignoti = [p for p in BACKTEST_PRESETS if p not in PRESET_DEFS]
 if _ignoti:
     raise SystemExit(f"Preset sconosciuti in BACKTEST_PRESETS: {_ignoti}. Validi: {list(PRESET_DEFS)}")
-RANDOM_TRADES_PER_SYMBOL = 40
+RANDOM_TRADES_PER_SYMBOL = 100
 RANDOM_SEED = 12345
 
 # Esposizione: posizioni nella stessa direzione per chiave (valute: 1)
@@ -266,8 +281,21 @@ def load_series(name, interval, bars, api_key, cache_dir, now_utc):
         return None, msg
     df = pd.concat(parts, ignore_index=True).sort_values("time")
     df = df.drop_duplicates("time", keep="last").reset_index(drop=True)
+    df, bad_times = clean_ohlc(df)
+    if bad_times:
+        msg = (f"{msg}; candele incoerenti scartate: {len(bad_times)} "
+               f"(prima: {pd.Timestamp(bad_times[0]):%Y-%m-%d %H:%M})")
     df.to_csv(fn, index=False)
     return drop_incomplete(df, interval, now_utc), msg
+
+def clean_ohlc(df):
+    """Scarta solo le candele con prezzi incoerenti (prima si perdeva l'intera serie).
+    Ritorna (df pulito, lista dei timestamp scartati)."""
+    bad = ((df.high < df.low) | (df.close > df.high) | (df.close < df.low) |
+           (df.open > df.high) | (df.open < df.low) | (df.close <= 0))
+    if not bool(bad.any()):
+        return df, []
+    return df[~bad].reset_index(drop=True), list(df.loc[bad, "time"])
 
 # =============================================================================
 # 3. INDICATORI
@@ -661,7 +689,8 @@ def backtest_symbol(name, series, preset, gate_count, pb=None, pl=None):
     trades, busy_until, last_ext = [], -1, None
 
     if mode == "random":                      # preset di controllo: ingressi a caso
-        rng = np.random.default_rng(abs(hash(name)) % (2 ** 31) + RANDOM_SEED)
+        # seme ripetibile: hash() di Python cambia a ogni esecuzione, crc32 no
+        rng = np.random.default_rng(zlib.crc32(f"{preset}|{name}".encode()) + RANDOM_SEED)
         n = len(he)
         idxs = rng.choice(np.arange(60, n - 10), size=min(RANDOM_TRADES_PER_SYMBOL, max(1, n - 80)),
                           replace=False)
@@ -833,7 +862,10 @@ def run_backtest(api_key, out_dir):
                     pre_l[key] = precompute_levels(add_features(series[TF["level"]], "level"), P)
                 pb, pl = pre_b[key], pre_l[key]
             tr += backtest_symbol(name, series, preset, gate_count, pb, pl)
+        n_raw = len(tr)
         tr = apply_exposure(tr, P["exposure_filter"])
+        log(f"    trade generati {n_raw} | dopo filtro esposizione {len(tr)}"
+            f"{'' if P['exposure_filter'] else ' (filtro disattivato)'}")
         for t in tr:
             all_tr.append(t)
         if tr:
@@ -845,7 +877,10 @@ def run_backtest(api_key, out_dir):
             tis = toos = []
         for label, subset in (("tutto", tr), (f"in-sample (primi {int(OOS_SPLIT*100)}%)", tis),
                               ("out-of-sample (ultimi 30%)", toos)):
-            s = stats(subset, label); s["Preset"] = preset; summary.append(s)
+            s = stats(subset, label); s["Preset"] = preset
+            if label == "tutto":
+                s["Trade prima del filtro esposizione"] = n_raw
+            summary.append(s)
         for g, n in sorted(gate_count.items(), key=lambda x: -x[1]):
             gate_rows.append({"Preset": preset, "Motivo di scarto": g, "Candele d'ingresso": n})
         s0 = [s for s in summary if s["Preset"] == preset and s["Periodo"] == "tutto"][0]
@@ -857,7 +892,8 @@ def run_backtest(api_key, out_dir):
     cols = ["Preset", "Periodo", "Trade", "Dal", "Al", "Trade/mese", "Vincenti %", "Win rate di pareggio %",
             "R medio (expectancy)", "R totale", "R medio vincenti", "R medio perdenti",
             "Profit factor", "Max drawdown (R)", "Max perdite consecutive",
-            "Giorni medi in posizione", "Usciti per time stop %", "Giudizio"]
+            "Giorni medi in posizione", "Usciti per time stop %", "Giudizio",
+            "Trade prima del filtro esposizione"]
     sm = sm[[c for c in cols if c in sm.columns]]
     log("\n" + sm[sm.Periodo == "tutto"].to_string(index=False))
 
@@ -868,8 +904,12 @@ def run_backtest(api_key, out_dir):
         f"Giudizio: sotto {MIN_TRADES_NOISE} trade è rumore; da {MIN_TRADES_OK} si può iniziare a concludere.",
         "In-sample / out-of-sample: il periodo è diviso in due. Un preset che va bene solo nella prima "
         "parte è adattato al campione, non valido.",
-        "'controllo_casuale' entra a caso con lo stesso stop, lo stesso target e gli stessi costi: è il "
-        "metro di paragone. Un preset che non lo batte non ha alcun vantaggio.",
+        "'controllo_casuale' (set D1H4H1) e 'controllo_casuale_H4H1M15' entrano a caso con lo stesso stop, "
+        "lo stesso target e gli stessi costi: sono il metro di paragone, ciascuno per il proprio set di "
+        "timeframe. Un preset che non batte il controllo del suo set non ha alcun vantaggio.",
+        "Il controllo casuale non usa il filtro di esposizione: misura l'expectancy per trade di un "
+        "ingresso casuale. La colonna 'Trade prima del filtro esposizione' mostra quanti trade ogni "
+        "preset ha perso per quel filtro.",
         "'v3_originale' include il difetto noto (forex considerato aperto nel weekend); "
         "'v3_con_filtro_weekend' è il confronto onesto.",
         "I conteggi del foglio 'Motivi di scarto' sono CANDELE, non setup indipendenti.",
