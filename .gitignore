@@ -1,0 +1,6 @@
+# Output locali (su GitHub Actions i report vanno in Artifacts/Releases)
+TRADING_V5/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.env
