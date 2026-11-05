@@ -7,6 +7,13 @@
 #  - fallisce se non viene prodotto nessun file .xlsx (prima "riusciva" a vuoto)
 #  - puo' pubblicare il report anche come Release, oltre che come artifact
 #
+# MODIFICHE v5.1 (05/11/2026):
+#  - run aggiuntivi lunedi' e giovedi': tengono viva la cache (GitHub elimina le cache
+#    non usate per 7 giorni) e fanno crescere la storia di M15 e H1
+#  - Release solo dal run mensile o da quello manuale con l'opzione spuntata
+#    (prima la condizione "!= false" era ambigua nei run pianificati)
+#  - concurrency: due run non partono mai insieme (stessa cache, stessi crediti API)
+#
 # IMPORTANTE: il blocco "cache" conserva TRADING_V5/cache tra un'esecuzione e l'altra.
 # Senza di esso ogni run riparte dalle sole 5000 candele scaricabili e la storia non cresce.
 name: Trading v5
@@ -37,10 +44,15 @@ on:
         default: true
         type: boolean
   schedule:
-    - cron: "0 5 1 * *"      # backtest mensile: 1 del mese, 05:00 UTC
+    - cron: "0 5 1 * *"      # backtest mensile: 1 del mese, 05:00 UTC (con Release)
+    - cron: "0 4 * * 1,4"    # lunedi' e giovedi' 04:00 UTC: aggiorna la cache (senza Release)
 
 permissions:
   contents: write            # necessario per creare la Release
+
+concurrency:
+  group: trading-v5
+  cancel-in-progress: false  # il secondo run aspetta che finisca il primo
 
 jobs:
   run:
@@ -113,7 +125,8 @@ jobs:
           retention-days: 90
 
       - name: Pubblica Release
-        if: ${{ inputs.pubblica_release != false }}
+        # Release: run manuale con l'opzione spuntata, oppure run mensile pianificato
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.pubblica_release) || github.event.schedule == '0 5 1 * *' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
