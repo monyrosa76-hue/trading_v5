@@ -58,6 +58,27 @@ senza, H1 batterebbe il caso solo grazie al rialzo del mercato azionario.
 Testare 5 varianti sugli stessi dati aumenta il rischio di un risultato positivo per caso:
 una variante si accetta solo se supera le 4 condizioni E si conferma nei backtest successivi.
 
+## Forward test (v5.5)
+
+`mode=scan` (i 3 run giornalieri) esegue il **forward test** del preset `D1H4H1_zone_H123`
+sulle 15 azioni USA: le stesse identiche regole del backtest, applicate solo alle candele
+successive al 07/11/2026. È la verifica fuori campione più onesta: dati che il backtest
+non ha mai visto.
+
+- Ogni trade viene scritto in `forward/registro_forward.csv`, salvato nel repository con un
+  commit automatico (non si perde con la cache). Entry, SL e TP vengono congelati alla
+  registrazione; l'esito si calcola sulle candele successive.
+- Report `Forward_v5_*.xlsx`: Riepilogo forward, Nuovi in questo run, Registro completo.
+- Notifica Telegram: nuovi trade, chiusure, totale (R medio) e posizioni aperte.
+- È **osservazione**, non operatività, finché il preset non supera le 4 condizioni.
+- Consumo: 45 chiamate API per run (15 azioni × 3 timeframe).
+- Variabili opzionali: `SCAN_PRESET`, `SCAN_CLASSES`, `FORWARD_START`;
+  `SCAN_PRESET=legacy` riattiva il vecchio scanner.
+
+**Correzione importante (v5.5)**: i livelli usavano un pivot la cui conferma richiedeva una
+candela non ancora chiusa (lookahead). I risultati dei backtest precedenti alla v5.5 possono
+essere ottimistici e vanno ricalcolati.
+
 ## Il report Excel
 
 Il primo foglio, **Esito**, dice quali prodotti superano le 4 condizioni, a tre livelli:

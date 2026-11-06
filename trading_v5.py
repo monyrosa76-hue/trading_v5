@@ -28,6 +28,17 @@
       D1H4H1   : bias D1, livelli H4, ingresso H1   (storia limitata dall'H1)
       H4H1M15  : bias H4, livelli H1, ingresso M15  (la configurazione v4)
 
+ MODIFICHE v5.5 (06/11/2026) - forward test
+   MODE=scan ora esegue il FORWARD TEST del preset D1H4H1_zone_H123 sulle azioni USA:
+   stesse identiche regole del backtest, applicate alle sole candele dopo il 07/11/2026.
+   Ogni trade è registrato in forward/registro_forward.csv (nel repository, non in cache),
+   con livelli congelati; l'esito si calcola sulle candele successive.
+   FIX lookahead nei livelli: il backtest usava un pivot la cui conferma richiedeva una
+   candela del timeframe livelli non ancora chiusa. Tutti i risultati precedenti alla v5.5
+   possono essere ottimistici e vanno ricalcolati.
+   Variabili: SCAN_PRESET, SCAN_CLASSES, FORWARD_START, FORWARD_FILE. SCAN_PRESET=legacy
+   riattiva il vecchio scanner (solo ultima candela, filtro mercato aperto).
+
  MODIFICHE v5.4 (06/11/2026) - revisione della strategia, 3 ipotesi decise prima del test
    H1 solo acquisti su azioni e indici (la vendita allo scoperto perdeva: sell -0,64R)
    H2 stop di almeno 1,5 ATR del timeframe bias (gli stop subivano gap per -0,17R)
@@ -468,8 +479,12 @@ def precompute_levels(hl, P):
     for k in range(lb, n):
         a = k - lb
         tol = P["level_tol_atr"] * atr[k]
+        # FIX v5.5 (lookahead): un pivot in posizione m è confermato solo con le candele m+1 e m+2.
+        # Alla candela chiusa k sono quindi validi solo i pivot fino a k-2 (prima si usava anche
+        # k-1, la cui conferma richiede la candela k+1, non ancora chiusa).
+        e = k - 1
         for store, flags, vals in ((sup, fl, low), (res, fh, high)):
-            piv = vals[a:k][flags[a:k]]
+            piv = vals[a:e][flags[a:e]]
             out = []
             if len(piv):
                 used = np.zeros(len(piv), bool)
@@ -1326,6 +1341,168 @@ def run_scan(api_key, out_dir):
             "gli strumenti che stanno rientrando nella fascia.")
 
 # =============================================================================
+# =============================================================================
+# 12. FORWARD TEST (v5.5): verifica sui dati futuri, senza ritocchi
+# =============================================================================
+FORWARD_PRESET  = os.environ.get("SCAN_PRESET", "").strip() or "D1H4H1_zone_H123"
+FORWARD_CLASSES = [c.strip() for c in (os.environ.get("SCAN_CLASSES", "").strip() or "stock_us").split(",") if c.strip()]
+FORWARD_START   = pd.Timestamp(os.environ.get("FORWARD_START", "").strip() or "2026-11-07", tz="UTC")
+FORWARD_FILE    = os.environ.get("FORWARD_FILE", "").strip() or os.path.join("forward", "registro_forward.csv")
+FORWARD_COLS = ["ID", "Preset", "Strumento", "Direzione", "Ingresso (UTC)", "Ingresso (Roma)",
+                "Entry", "SL", "TP", "Stop %", "Stato", "Uscita (Roma)", "Uscita per", "R",
+                "Registrato il (UTC)", "Chiuso il (UTC)", "Note"]
+# riferimento: l'ultimo backtest v5.5 (senza lookahead), foglio Esito, livello "Azioni USA".
+# I numeri del 06/11/2026 (+0,162R su 73 trade) erano calcolati con il lookahead e NON valgono.
+FORWARD_REF = os.environ.get("FORWARD_REF", "").strip() or "ultimo backtest v5.5, foglio Esito, Azioni USA"
+
+def _fmt_r(x):
+    return "n.d." if x is None or pd.isna(x) else f"{x:+.3f}R"
+
+def run_forward(api_key, out_dir):
+    """Applica ESATTAMENTE la logica del backtest del preset scelto e registra solo i trade con
+    ingresso dopo FORWARD_START. Livelli congelati alla registrazione; esito calcolato sulle
+    candele successive. Il registro (CSV nel repository) non si perde con la cache."""
+    preset = FORWARD_PRESET
+    tfset_name, mode, over = PRESET_DEFS[preset]
+    TF = TF_SETS[tfset_name]; P = dict(PARAMS, **over)
+    now_utc = pd.Timestamp.now(tz="UTC"); now_rome = now_utc.tz_convert(ROME)
+    cache = os.path.join(out_dir, "cache")
+    universe = [n for n, v in INSTRUMENTS.items() if v[2] in FORWARD_CLASSES]
+    log("=" * 70)
+    log(f"  FORWARD TEST v5 — {now_rome:%Y-%m-%d %H:%M} (Roma)")
+    log(f"  Preset: {preset} | classi: {', '.join(FORWARD_CLASSES)} | strumenti: {len(universe)}")
+    log(f"  Trade registrati se l'ingresso è dal {FORWARD_START:%Y-%m-%d} in poi")
+    log("=" * 70)
+
+    data, dataload = {}, []
+    for name in universe:
+        series = {}
+        for role in ("bias", "level", "entry"):
+            tf = TF[role]
+            df, msg = load_series(name, tf, 500, api_key, cache, now_utc)
+            dataload.append({"Strumento": name, "Timeframe": tf,
+                             "Candele": 0 if df is None else len(df), "Messaggio": msg,
+                             "Ultima candela": "" if df is None or not len(df) else f"{df.time.iloc[-1]:%Y-%m-%d %H:%M}"})
+            if not ohlc_valid(df, 230 if role == "bias" else 120):
+                log(f"  {name:22s} {tf:6s} NON UTILIZZABILE ({msg})"); series = None; break
+            series[tf] = df
+        if series:
+            data[name] = series
+            log(f"  {name:22s} ok (ultima candela {TF['entry']}: {series[TF['entry']].time.iloc[-1]:%Y-%m-%d %H:%M} UTC)")
+
+    # stessa pipeline del backtest: segnali per strumento, poi filtro di esposizione
+    gate_count, tr = {}, []
+    for name, series in data.items():
+        hb_, hl_ = add_features(series[TF["bias"]], "bias"), add_features(series[TF["level"]], "level")
+        pb, pl = precompute_bias(hb_, P), precompute_levels(hl_, P)
+        tr += backtest_symbol(name, series, preset, gate_count, pb, pl)
+    tr = apply_exposure(tr, P["exposure_filter"])
+    fresh = [t for t in tr if pd.Timestamp(t["_t_in"]).tz_localize("UTC") >= FORWARD_START]
+
+    # registro
+    reg = pd.DataFrame(columns=FORWARD_COLS)
+    if os.path.exists(FORWARD_FILE):
+        try:
+            reg = pd.read_csv(FORWARD_FILE, dtype={"ID": str})
+        except Exception as e:
+            log(f"(!) registro illeggibile, ne creo uno nuovo: {e}")
+    known = set(reg["ID"].astype(str)) if len(reg) else set()
+    stamp = f"{now_utc:%Y-%m-%d %H:%M}"
+    new_rows, closed_now = [], []
+
+    # 1) aggiorna le posizioni APERTE con i livelli congelati
+    for k, row in reg.iterrows():
+        if row.get("Stato") != "APERTO" or row["Strumento"] not in data:
+            continue
+        he = add_features(data[row["Strumento"]][TF["entry"]], "entry")
+        t_in = pd.Timestamp(row["Ingresso (UTC)"], tz="UTC").tz_localize(None)
+        hit = np.where(he.time.dt.tz_localize(None).values == np.datetime64(t_in))[0]
+        if not len(hit):
+            continue
+        i = int(hit[0])
+        sig = {"Direzione": row["Direzione"], "Entry": float(row["Entry"]), "SL": float(row["SL"]), "TP": float(row["TP"])}
+        j, R, why = simulate(he, i, sig, P, INSTRUMENTS[row["Strumento"]][2], TF["time_stop_hours"])
+        if why != "APERTO A FINE DATI":
+            t_out = he.time.dt.tz_convert(ROME).iloc[j]
+            reg.loc[k, ["Stato", "Uscita (Roma)", "Uscita per", "R", "Chiuso il (UTC)"]] = \
+                ["CHIUSO", f"{t_out:%Y-%m-%d %H:%M}", why, round(R, 3), stamp]
+            closed_now.append(reg.loc[k].to_dict())
+
+    # 2) registra i nuovi trade (con l'esito, se si sono già chiusi tra un run e l'altro)
+    for t in sorted(fresh, key=lambda x: x["_t_in"]):
+        t_in = pd.Timestamp(t["_t_in"]).tz_localize("UTC")
+        tid = f"{t['Strumento']}|{t_in:%Y-%m-%d %H:%M}"
+        if tid in known:
+            continue
+        closed = t["Uscita per"] != "APERTO A FINE DATI"
+        row = {"ID": tid, "Preset": preset, "Strumento": t["Strumento"], "Direzione": t["Direzione"],
+               "Ingresso (UTC)": f"{t_in:%Y-%m-%d %H:%M}", "Ingresso (Roma)": t["Ingresso (Roma)"],
+               "Entry": t["Entry"], "SL": t["SL"], "TP": t["TP"], "Stop %": t["Stop %"],
+               "Stato": "CHIUSO" if closed else "APERTO",
+               "Uscita (Roma)": t["Uscita (Roma)"] if closed else "", "Uscita per": t["Uscita per"] if closed else "",
+               "R": t["R"] if closed else np.nan, "Registrato il (UTC)": stamp, "Chiuso il (UTC)": stamp if closed else ""}
+        # trasparenza: un trade che compare con ingresso vecchio (> 2 giorni) può indicare dati rivisti
+        row["Note"] = "registrato in ritardo: verificare" if (now_utc - t_in) > pd.Timedelta(days=2) else ""
+        new_rows.append(row); known.add(tid)
+        if closed:
+            closed_now.append(row)
+    if new_rows:
+        reg = pd.concat([reg, pd.DataFrame(new_rows)], ignore_index=True)
+    reg = reg.reindex(columns=FORWARD_COLS)
+    os.makedirs(os.path.dirname(FORWARD_FILE) or ".", exist_ok=True)
+    reg.to_csv(FORWARD_FILE, index=False)
+
+    # riepilogo
+    ch = reg[reg.Stato == "CHIUSO"]
+    Rs = pd.to_numeric(ch["R"], errors="coerce").dropna()
+    n_open = int((reg.Stato == "APERTO").sum())
+    summ = {"Preset": preset, "Classi": ", ".join(FORWARD_CLASSES), "Inizio forward": f"{FORWARD_START:%Y-%m-%d}",
+            "Trade chiusi": len(Rs), "Vincenti %": round(float((Rs > 0).mean() * 100), 1) if len(Rs) else None,
+            "R medio": round(float(Rs.mean()), 3) if len(Rs) else None,
+            "R totale": round(float(Rs.sum()), 2) if len(Rs) else None,
+            "Posizioni aperte": n_open, "Riferimento": FORWARD_REF,
+            "Validazione": f"servono almeno {MIN_TRADES_OK} trade chiusi" if len(Rs) < MIN_TRADES_OK
+                           else ("R medio > 0" if Rs.mean() > 0 else "R medio <= 0: ipotesi NON confermata")}
+    log(f"\nNuovi trade registrati: {len(new_rows)} | chiusi in questo run: {len(closed_now)} | "
+        f"totale chiusi: {len(Rs)} (R medio {_fmt_r(summ['R medio'])}) | aperti: {n_open}")
+
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"Forward_v5_{now_rome:%Y%m%d_%H%M}.xlsx")
+    with pd.ExcelWriter(path, engine="openpyxl") as xw:
+        pd.DataFrame([summ]).T.reset_index().rename(columns={"index": "Voce", 0: "Valore"}) \
+            .to_excel(xw, sheet_name="Riepilogo forward", index=False)
+        pd.DataFrame(new_rows, columns=FORWARD_COLS).to_excel(xw, sheet_name="Nuovi in questo run", index=False)
+        reg.to_excel(xw, sheet_name="Registro completo", index=False)
+        pd.DataFrame(dataload).to_excel(xw, sheet_name="Dati caricati", index=False)
+        pd.DataFrame({"Nota": [
+            "Forward test: le stesse regole del backtest applicate SOLO a candele successive alla data di inizio.",
+            "Entry, SL e TP vengono congelati quando il trade è registrato; l'esito si calcola sulle candele successive.",
+            "Ingresso al prezzo di chiusura della candela del segnale (come nel backtest): su eToro il prezzo reale "
+            "può differire, soprattutto all'apertura del mercato.",
+            "È OSSERVAZIONE, non operatività: il preset non è validato finché non supera le 4 condizioni.",
+            "Il registro è il file forward/registro_forward.csv nel repository (non si perde con la cache)."]}) \
+            .to_excel(xw, sheet_name="Come leggere", index=False)
+        for ws in xw.book.worksheets:
+            for col in ws.columns:
+                ws.column_dimensions[col[0].column_letter].width = 22
+    log(f"File: {path}")
+
+    righe = [f"Forward test {preset} ({', '.join(CLASS_LABEL.get(c, c) for c in FORWARD_CLASSES)})",
+             f"Strumenti con dati: {len(data)} su {len(universe)}"]
+    for r in new_rows:
+        righe.append(f"NUOVO: {r['Strumento']} {r['Direzione']} il {r['Ingresso (Roma)']} | entry {r['Entry']:.2f} "
+                     f"SL {r['SL']:.2f} TP {r['TP']:.2f}" + (f" -> già chiuso {r['Uscita per']} {_fmt_r(r['R'])}"
+                                                           if r['Stato'] == 'CHIUSO' else ""))
+    for r in closed_now:
+        if r not in new_rows:
+            righe.append(f"CHIUSO: {r['Strumento']} {r['Direzione']} -> {r['Uscita per']} {_fmt_r(r['R'])}")
+    if not new_rows and not closed_now:
+        righe.append("Nessun nuovo trade e nessuna chiusura.")
+    righe.append(f"Totale: {len(Rs)} chiusi, R medio {_fmt_r(summ['R medio'])}, aperti {n_open}. "
+                 f"Riferimento {FORWARD_REF}.")
+    righe.append("Osservazione, NON operatività: preset non validato.")
+    write_notice(out_dir, righe)
+
 def main():
     api_key = get_api_key(); out_dir = get_out_dir()
     cache_files = [f for f in os.listdir(os.path.join(out_dir, "cache")) if f.endswith(".csv")]
@@ -1339,7 +1516,11 @@ def main():
                 "Il nome del secret deve coincidere con quello indicato nel file del workflow.\n"
                 "Attenzione: un valore inserito nella scheda 'Variables' NON viene letto come secret.")
         log("(!) API key assente: proseguo con i soli dati già in cache.")
-    (run_scan if MODE == "scan" else run_backtest)(api_key, out_dir)
+    if MODE == "scan":
+        # v5.5: lo scanner è il forward test del preset scelto; SCAN_PRESET=legacy -> vecchio scanner
+        (run_scan if os.environ.get("SCAN_PRESET", "").strip() == "legacy" else run_forward)(api_key, out_dir)
+    else:
+        run_backtest(api_key, out_dir)
 
 if __name__ == "__main__":
     main()
