@@ -28,6 +28,20 @@
       D1H4H1   : bias D1, livelli H4, ingresso H1   (storia limitata dall'H1)
       H4H1M15  : bias H4, livelli H1, ingresso M15  (la configurazione v4)
 
+ MODIFICHE v5.4 (06/11/2026) - revisione della strategia, 3 ipotesi decise prima del test
+   H1 solo acquisti su azioni e indici (la vendita allo scoperto perdeva: sell -0,64R)
+   H2 stop di almeno 1,5 ATR del timeframe bias (gli stop subivano gap per -0,17R)
+   H3 nessun nuovo ingresso il venerdì su azioni e indici (gap del weekend)
+   Preset: D1H4H1_zone_H1 / _H2 / _H3 / _H123 e H4H1M15_zone_H123.
+   Ognuno ha un controllo casuale con le STESSE regole (es. solo acquisti): così un
+   miglioramento dovuto solo al rialzo del mercato non viene scambiato per vantaggio.
+
+ MODIFICHE v5.3 (06/11/2026)
+   - Azioni asiatiche escluse di default (non disponibili sul piano free: verificato).
+     Riattivabili con la variabile d'ambiente INCLUDI_ASIA=1.
+   - Scrive TRADING_V5/notifica.txt: riepilogo breve che il workflow invia su Telegram.
+     La variabile RUN_LABEL (es. "Sessione USA") compare come titolo del messaggio.
+
  MODIFICHE v5.2 (05/11/2026)
    - Universo completo reintegrato: 13 forex, oro, DAX, 15 azioni USA, ASML e SAP,
      8 azioni asiatiche. Il backtest usa TUTTI gli strumenti (prima solo forex + oro).
@@ -136,6 +150,9 @@ PARAMS = dict(
     weekend_filter   = True,
     exposure_filter  = True,
     close_before_weekend = False,
+    # --- revisione v5.4 (ipotesi H1/H3; H2 usa min_stop_atr_bias) ---
+    long_only_classes = (),    # H1: in queste classi solo acquisti
+    no_friday_classes = (),    # H3: in queste classi nessun nuovo ingresso il venerdì
 )
 
 # Preset del backtest: nome -> (set timeframe, modalità ingresso, override parametri)
@@ -152,11 +169,28 @@ PRESET_DEFS = {
     "controllo_casuale":         ("D1H4H1",  "random", dict(exposure_filter=False)),
     "controllo_casuale_H4H1M15": ("H4H1M15", "random", dict(exposure_filter=False)),
 }
+# ---- Revisione v5.4: ipotesi decise PRIMA del test (06/11/2026) ----
+#  H1 solo acquisti su azioni e indici | H2 stop >= 1,5 ATR bias | H3 niente ingressi il venerdì su azioni e indici
+_EQ = ("stock_us", "stock_eu", "stock_asia", "index")
+HYP = {"H1": dict(long_only_classes=_EQ), "H2": dict(min_stop_atr_bias=1.5),
+       "H3": dict(no_friday_classes=_EQ)}
+HYP["H123"] = dict(**HYP["H1"], **HYP["H2"], **HYP["H3"])
+CONTROL_OF = {}   # preset -> controllo casuale con le STESSE regole (stesso stop, direzioni, giorni)
+for _h in ("H1", "H2", "H3", "H123"):
+    PRESET_DEFS[f"D1H4H1_zone_{_h}"] = ("D1H4H1", "zone", dict(HYP[_h]))
+    PRESET_DEFS[f"controllo_casuale_{_h}"] = ("D1H4H1", "random", dict(exposure_filter=False, **HYP[_h]))
+    CONTROL_OF[f"D1H4H1_zone_{_h}"] = f"controllo_casuale_{_h}"
+PRESET_DEFS["H4H1M15_zone_H123"] = ("H4H1M15", "zone", dict(HYP["H123"]))
+PRESET_DEFS["controllo_casuale_H4H1M15_H123"] = ("H4H1M15", "random", dict(exposure_filter=False, **HYP["H123"]))
+CONTROL_OF["H4H1M15_zone_H123"] = "controllo_casuale_H4H1M15_H123"
 # NB: "or" (non il default di .get) perche' GitHub Actions passa la variabile VUOTA
 # quando l'input "presets" non e' compilato (run pianificati): con .get(.., default)
 # la lista risultava vuota e il backtest non scaricava nulla.
 _BACKTEST_PRESETS_DEFAULT = ("D1H4H1_zone,D1H4H1_reversal,D1H4H1_pinbar,H4H1M15_zone,H4H1M15_reversal,"
-                             "v3_originale,v3_con_filtro_weekend,controllo_casuale,controllo_casuale_H4H1M15")
+                             "v3_originale,v3_con_filtro_weekend,controllo_casuale,controllo_casuale_H4H1M15,"
+                             "D1H4H1_zone_H1,controllo_casuale_H1,D1H4H1_zone_H2,controllo_casuale_H2,"
+                             "D1H4H1_zone_H3,controllo_casuale_H3,D1H4H1_zone_H123,controllo_casuale_H123,"
+                             "H4H1M15_zone_H123,controllo_casuale_H4H1M15_H123")
 BACKTEST_PRESETS = [p.strip() for p in
                     (os.environ.get("BACKTEST_PRESETS", "").strip() or _BACKTEST_PRESETS_DEFAULT).split(",")
                     if p.strip()]
@@ -199,7 +233,11 @@ INSTRUMENTS.update({
     # ---- AZIONI EU quotate negli USA (orari di borsa USA) ----
     "ASML":                  ("ASML",  "NASDAQ", "stock_eu", "us"),
     "SAP":                   ("SAP",   "NYSE",   "stock_eu", "us"),
-    # ---- AZIONI ASIATICHE [copertura del piano free DA VERIFICARE: vedi foglio "Dati caricati"] ----
+})
+# ---- AZIONI ASIATICHE: NON disponibili sul piano free (verificato nel run del 05/11/2026:
+#      3988, 9988, 002594 -> "disponibile dal piano Pro o Venture"; gli altri -> simbolo non valido).
+#      Escluse di default; per riattivarle (piano a pagamento) impostare INCLUDI_ASIA=1.
+ASIA_STOCKS = {
     "Mitsubishi UFJ (8306)": ("8306",   "TSE",  "stock_asia", "tokyo"),
     "SoftBank (9984)":       ("9984",   "TSE",  "stock_asia", "tokyo"),
     "Toyota (7203)":         ("7203",   "TSE",  "stock_asia", "tokyo"),
@@ -208,8 +246,10 @@ INSTRUMENTS.update({
     "Alibaba (9988)":        ("9988",   "HKEX", "stock_asia", "tokyo"),
     "Tencent (0700)":        ("700",    "HKEX", "stock_asia", "tokyo"),
     "BYD (002594)":          ("002594", "SZSE", "stock_asia", "tokyo"),
-})
-# Il backtest usa TUTTI gli strumenti (v5.2). Quelli non coperti dal piano risultano
+}
+if os.environ.get("INCLUDI_ASIA", "").strip() == "1":
+    INSTRUMENTS.update(ASIA_STOCKS)
+# Il backtest usa TUTTI gli strumenti attivi. Quelli non coperti dal piano risultano
 # "NON UTILIZZABILE" nel foglio "Dati caricati" e vengono saltati.
 BACKTEST_SYMBOLS = list(INSTRUMENTS)
 
@@ -326,6 +366,17 @@ def load_series(name, interval, bars, api_key, cache_dir, now_utc):
                f"(prima: {pd.Timestamp(bad_times[0]):%Y-%m-%d %H:%M})")
     df.to_csv(fn, index=False)
     return drop_incomplete(df, interval, now_utc), msg
+
+def write_notice(out_dir, lines):
+    """Testo breve per la notifica Telegram (lo invia il workflow, se configurato)."""
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        label = os.environ.get("RUN_LABEL", "").strip()
+        head = [f"Trading v5 - {label}" if label else "Trading v5"]
+        with open(os.path.join(out_dir, "notifica.txt"), "w", encoding="utf-8") as fh:
+            fh.write("\n".join(head + list(lines))[:3500])   # limite messaggio Telegram: 4096 caratteri
+    except Exception as e:
+        log(f"(notifica non scritta: {e})")
 
 def clean_ohlc(df):
     """Scarta solo le candele con prezzi incoerenti (prima si perdeva l'intera serie).
@@ -449,6 +500,14 @@ def market_open(name, now_rome):
         return False
     s, e = SESSIONS[mkt]
     return s <= h < e
+
+def variant_block(P, cls, d, ts_rome):
+    """Regole della revisione v5.4. Ritorna il motivo dello scarto oppure None."""
+    if d == -1 and cls in P["long_only_classes"]:
+        return "H1: vendita esclusa (solo acquisti su azioni e indici)"
+    if ts_rome.weekday() == 4 and cls in P["no_friday_classes"]:
+        return "H3: nessun ingresso il venerdì"
+    return None
 
 def weekend_block(ts_rome):
     wd, h = ts_rome.weekday(), ts_rome.hour
@@ -740,6 +799,10 @@ def backtest_symbol(name, series, preset, gate_count, pb=None, pl=None):
             if P["weekend_filter"] and weekend_block(times_rome.iloc[i]):
                 continue
             d = 1 if rng.random() < 0.5 else -1
+            if cls in P["long_only_classes"]:
+                d = 1                          # stesso vincolo H1 della strategia
+            if variant_block(P, cls, d, times_rome.iloc[i]):
+                continue                       # stesso vincolo H3 della strategia
             entry = float(he.close.values[i]); ab = float(hb.atr.values[kb])
             risk = P["min_stop_atr_bias"] * ab
             sig = {"Direzione": "buy" if d == 1 else "sell", "Entry": entry,
@@ -766,6 +829,10 @@ def backtest_symbol(name, series, preset, gate_count, pb=None, pl=None):
         if not sig["ok"]:
             g = sig["gate"].split(" (")[0]
             gate_count[g] = gate_count.get(g, 0) + 1
+            continue
+        why_v = variant_block(P, cls, 1 if sig["Direzione"] == "buy" else -1, times_rome.iloc[i])
+        if why_v:
+            gate_count[why_v] = gate_count.get(why_v, 0) + 1
             continue
         if P["one_trade_per_impulse"] and last_ext is not None and np.isfinite(sig.get("_ext", np.nan)) \
                 and np.isclose(sig["_ext"], last_ext, rtol=1e-9, atol=0):
@@ -858,7 +925,7 @@ def build_esito(all_tr, cuts):
     for preset in BACKTEST_PRESETS:          # anche i preset senza trade compaiono
         tr = by_p.get(preset, [])
         tfset = PRESET_DEFS[preset][0]
-        rnd = RANDOM_OF_SET.get(tfset)
+        rnd = CONTROL_OF.get(preset, RANDOM_OF_SET.get(tfset))
         if PRESET_DEFS[preset][1] == "random":
             continue                         # i controlli sono il metro, non si validano
         rtr = by_p.get(rnd, [])
@@ -883,6 +950,7 @@ def build_esito(all_tr, cuts):
                   if len(sub) > 1 else None)
             rows.append({
                 "Livello": level, "Preset": preset, "Set timeframe": tfset, "Ambito": scope,
+                "Controllo usato": rnd if rnd in by_p else "(non eseguito)",
                 "Trade": len(sub), "Expectancy R": e, "Errore std R": se,
                 "Controllo casuale R": er, "Trade controllo": len(rsub),
                 "Differenza vs casuale R": round(e - er, 3) if e is not None and er is not None else None,
@@ -1057,6 +1125,16 @@ def run_backtest(api_key, out_dir):
             f"R totale {s0.get('R totale')} | {s0['Giudizio']}")
 
     esito = build_esito(all_tr, cuts)
+    righe = [f"Backtest - {datetime.now():%d/%m/%Y %H:%M} | strumenti con dati: {len(data)} su {len(BACKTEST_SYMBOLS)}"]
+    if not esito.empty:
+        sup = esito[esito.ESITO == "SUPERA"]
+        righe.append("ESITO: " + ("NESSUN prodotto supera le 4 condizioni" if sup.empty else
+                                  "SUPERANO: " + "; ".join(f"{a} [{b}]" for a, b in zip(sup.Ambito, sup.Preset))))
+        for _, r in esito[esito.Livello.str.startswith("1")].iterrows():
+            fr = lambda v: "n.d." if pd.isna(v) else f"{v}R"
+            righe.append(f"- {r['Preset']}: {r['Trade']} trade, {fr(r['Expectancy R'])} "
+                         f"(casuale {fr(r['Controllo casuale R'])}) {r['Condizioni superate']}")
+    write_notice(out_dir, righe)
     if not esito.empty:
         sup = esito[esito.ESITO == "SUPERA"]
         log("\nESITO: " + ("nessun prodotto supera le 4 condizioni" if sup.empty else
@@ -1237,6 +1315,12 @@ def run_scan(api_key, out_dir):
                 ws.column_dimensions[col[0].column_letter].width = min(
                     70, max(10, max(len(str(c.value or "")) for c in col[:60]) + 2))
     log(f"\nSegnali operativi: {len(ok_df)} | Da tenere d'occhio: {len(watch)} | File: {path}")
+    righe = [f"Scanner {tfset_name} / {mode} - {now_rome:%d/%m/%Y %H:%M} (Roma)",
+             f"Strumenti analizzati: {len(df)} | Segnali: {len(ok_df)} | Da tenere d'occhio: {len(watch)}"]
+    for _, r in ok_df.head(10).iterrows():
+        righe.append(f"- {r['Strumento']} {r['Direzione']} entry {r['Entry']} SL {r['SL']} TP {r['TP']}")
+    righe.append("ATTENZIONE: preset NON validato dal backtest. Segnali solo da osservare, non da operare.")
+    write_notice(out_dir, righe)
     if len(ok_df) == 0:
         log("Nessun segnale: con regole selettive è normale. Il foglio \"Da tenere d'occhio\" mostra "
             "gli strumenti che stanno rientrando nella fascia.")
