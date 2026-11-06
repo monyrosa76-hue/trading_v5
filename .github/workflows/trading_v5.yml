@@ -183,10 +183,24 @@ jobs:
           ESITO_JOB: ${{ job.status }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # La notifica non deve MAI far fallire il run: ogni errore diventa un avviso.
+          # Toglie spazi e a capo copiati per errore insieme ai secret.
+          TG_TOKEN="$(printf '%s' "$TG_TOKEN" | tr -d '[:space:]')"
+          TG_CHAT="$(printf '%s' "$TG_CHAT" | tr -d '[:space:]')"
           if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; then
             echo "Secret Telegram non configurati: notifica saltata."
             exit 0
           fi
+          # formato atteso: numero:codice (es. 123456789:AAH...), chat id numerico
+          if ! printf '%s' "$TG_TOKEN" | grep -Eq '^[0-9]+:[A-Za-z0-9_-]+$'; then
+            echo "::warning::TELEGRAM_BOT_TOKEN non ha il formato numero:codice (${#TG_TOKEN} caratteri). Ricopialo da BotFather."
+            exit 0
+          fi
+          if ! printf '%s' "$TG_CHAT" | grep -Eq '^-?[0-9]+$'; then
+            echo "::warning::TELEGRAM_CHAT_ID non e' un numero (${#TG_CHAT} caratteri)."
+            exit 0
+          fi
+          echo "Secret Telegram: token ${#TG_TOKEN} caratteri, chat id ${#TG_CHAT} caratteri."
           if [ "$ESITO_JOB" = "success" ]; then STATO="completato"; else STATO="NON riuscito ($ESITO_JOB)"; fi
           if [ -f TRADING_V5/notifica.txt ]; then
             TESTO="$(cat TRADING_V5/notifica.txt)"
@@ -201,11 +215,13 @@ jobs:
             "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
             --data-urlencode "chat_id=${TG_CHAT}" \
             --data-urlencode "text=${TESTO}" \
-            --data-urlencode "disable_web_page_preview=true"
+            --data-urlencode "disable_web_page_preview=true" \
+            || { echo "::warning::Invio del messaggio Telegram non riuscito (curl)."; exit 0; }
           grep -q '"ok":true' tg.json || { echo "::warning::Telegram ha rifiutato il messaggio: $(cat tg.json)"; exit 0; }
           if [ -n "$REPORT" ] && [ -f "$REPORT" ]; then
             curl -sS -o tg2.json -w "sendDocument HTTP %{http_code}\n" \
               "https://api.telegram.org/bot${TG_TOKEN}/sendDocument" \
-              -F "chat_id=${TG_CHAT}" -F "document=@${REPORT}"
+              -F "chat_id=${TG_CHAT}" -F "document=@${REPORT}" \
+              || { echo "::warning::Invio del report su Telegram non riuscito (curl)."; exit 0; }
             grep -q '"ok":true' tg2.json || echo "::warning::Invio del report non riuscito: $(cat tg2.json)"
           fi
