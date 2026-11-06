@@ -14,6 +14,11 @@
 #    (prima la condizione "!= false" era ambigua nei run pianificati)
 #  - concurrency: due run non partono mai insieme (stessa cache, stessi crediti API)
 #
+# MODIFICHE v5.5 (06/11/2026):
+#  - mode=scan esegue il FORWARD TEST (preset D1H4H1_zone_H123 sulle azioni USA) e salva
+#    il registro forward/registro_forward.csv nel repository con un commit automatico.
+#    Gli input tf_set ed entry_mode valgono solo per il vecchio scanner (SCAN_PRESET=legacy).
+#
 # MODIFICHE v5.3 (06/11/2026):
 #  - scanner 3 volte al giorno, lun-ven, agli orari delle tre sessioni (orari UTC: GitHub
 #    non segue l'ora legale, quindi in estate in Italia sono un'ora piu' tardi)
@@ -82,6 +87,8 @@ jobs:
          || secrets.APIKEY_TWELVEDATA }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0             # storia completa: serve per salvare il registro forward
 
       - name: Determina modalita' e sessione
         run: |
@@ -130,6 +137,26 @@ jobs:
           OUT_DIR: TRADING_V5
           REQUEST_DELAY: "8"
         run: python trading_v5.py
+
+      - name: Salva il registro del forward test nel repository
+        if: success() && env.MODE == 'scan'
+        run: |
+          if [ ! -f forward/registro_forward.csv ]; then
+            echo "Nessun registro forward da salvare."; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add forward/registro_forward.csv
+          if git diff --cached --quiet; then
+            echo "Registro invariato: nessun commit."; exit 0
+          fi
+          git commit -m "Forward test: aggiornamento registro (${RUN_LABEL})"
+          for tentativo in 1 2 3; do
+            git pull --rebase origin main && git push origin HEAD:main && { echo "Registro salvato."; exit 0; }
+            echo "Push non riuscito (tentativo $tentativo), riprovo..."; sleep 5
+          done
+          echo "::error::Registro forward NON salvato nel repository: controlla il log."
+          exit 1
 
       - name: Verifica che il report esista
         run: |
