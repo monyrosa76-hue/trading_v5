@@ -1,0 +1,211 @@
+# .github/workflows/trading_v5.yml
+# Esegue trading_v5.py su GitHub Actions.
+#
+# NOVITA' rispetto alla prima versione:
+#  - accetta il secret con piu' nomi possibili (TWELVEDATA_API_KEY, TWELVE_DATA_API_KEY, ...)
+#  - si ferma subito, con messaggio chiaro, se il secret non viene letto
+#  - fallisce se non viene prodotto nessun file .xlsx (prima "riusciva" a vuoto)
+#  - puo' pubblicare il report anche come Release, oltre che come artifact
+#
+# MODIFICHE v5.1 (05/11/2026):
+#  - run aggiuntivi lunedi' e giovedi': tengono viva la cache (GitHub elimina le cache
+#    non usate per 7 giorni) e fanno crescere la storia di M15 e H1
+#  - Release solo dal run mensile o da quello manuale con l'opzione spuntata
+#    (prima la condizione "!= false" era ambigua nei run pianificati)
+#  - concurrency: due run non partono mai insieme (stessa cache, stessi crediti API)
+#
+# MODIFICHE v5.3 (06/11/2026):
+#  - scanner 3 volte al giorno, lun-ven, agli orari delle tre sessioni (orari UTC: GitHub
+#    non segue l'ora legale, quindi in estate in Italia sono un'ora piu' tardi)
+#  - backtest settimanale il sabato (+ mensile con Release); la cache resta viva grazie
+#    agli scanner giornalieri
+#  - notifica Telegram a fine run (riuscito o fallito), con il report allegato.
+#    Richiede i secret TELEGRAM_BOT_TOKEN e TELEGRAM_CHAT_ID; senza, lo step viene saltato.
+#
+# IMPORTANTE: il blocco "cache" conserva TRADING_V5/cache tra un'esecuzione e l'altra.
+# Senza di esso ogni run riparte dalle sole 5000 candele scaricabili e la storia non cresce.
+name: Trading v5
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "scan oppure backtest"
+        default: "backtest"
+        type: choice
+        options: [backtest, scan]
+      tf_set:
+        description: "Set timeframe per lo scanner"
+        default: "D1H4H1"
+        type: choice
+        options: [D1H4H1, H4H1M15]
+      entry_mode:
+        description: "Modalita ingresso per lo scanner"
+        default: "reversal"
+        type: choice
+        options: [zone, reversal, pinbar]
+      presets:
+        description: "Preset del backtest (separati da virgola, vuoto = quelli di default)"
+        default: ""
+      pubblica_release:
+        description: "Pubblica il report anche come Release"
+        default: true
+        type: boolean
+  schedule:
+    # Scanner (lun-ven). Ora italiana: inverno = UTC+1, estate = UTC+2.
+    - cron: "47 6 * * 1-5"   # 06:47 UTC -> 07:47 / 08:47 Roma: chiusa Tokyo, prima dell'apertura Europa
+    - cron: "13 12 * * 1-5"  # 12:13 UTC -> 13:13 / 14:13 Roma: Europa a meta' sessione, prima dell'apertura USA
+    - cron: "23 21 * * 1-5"  # 21:23 UTC -> 22:23 / 23:23 Roma: dopo la chiusura USA
+    # Backtest
+    - cron: "11 5 * * 6"     # sabato 05:11 UTC: backtest settimanale (senza Release)
+    - cron: "0 5 1 * *"      # 1 del mese 05:00 UTC: backtest mensile (con Release)
+
+permissions:
+  contents: write            # necessario per creare la Release
+
+concurrency:
+  group: trading-v5
+  cancel-in-progress: false  # il secondo run aspetta che finisca il primo
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # Primo nome non vuoto tra questi. Aggiungi il tuo se il secret si chiama diversamente.
+      TWELVEDATA_API_KEY: >-
+        ${{ secrets.TWELVEDATA_API_KEY
+         || secrets.TWELVE_DATA_API_KEY
+         || secrets.TD_API_KEY
+         || secrets.TWELVEDATA_KEY
+         || secrets.API_KEY_TWELVEDATA
+         || secrets.APIKEY_TWELVEDATA }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determina modalita' e sessione
+        run: |
+          case "${{ github.event.schedule }}" in
+            "47 6 * * 1-5")  M=scan;     L="Sessione Asia (pre-apertura Europa)" ;;
+            "13 12 * * 1-5") M=scan;     L="Sessione Europa (pre-apertura USA)" ;;
+            "23 21 * * 1-5") M=scan;     L="Sessione USA (dopo la chiusura)" ;;
+            "11 5 * * 6")    M=backtest; L="Backtest settimanale" ;;
+            "0 5 1 * *")     M=backtest; L="Backtest mensile" ;;
+            *)               M="${{ inputs.mode || 'backtest' }}"; L="Run manuale ($M)" ;;
+          esac
+          echo "MODE=$M" >> $GITHUB_ENV
+          echo "RUN_LABEL=$L" >> $GITHUB_ENV
+          echo "Modalita': $M | $L"
+
+      - name: Verifica il secret della API key
+        run: |
+          if [ -z "$TWELVEDATA_API_KEY" ]; then
+            echo "::error::Nessun secret trovato. Vai in Settings > Secrets and variables > Actions, scheda 'Secrets', copia il NOME esatto del secret della chiave Twelvedata e aggiungilo all'elenco nel blocco env: di questo workflow (oppure rinomina il secret in TWELVEDATA_API_KEY)."
+            exit 1
+          fi
+          echo "Secret trovato: ${#TWELVEDATA_API_KEY} caratteri."
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installa dipendenze
+        run: pip install --quiet requests pandas numpy openpyxl pytz
+
+      # Chiave sempre nuova (cosi' la cache viene salvata a ogni run),
+      # restore-keys recupera la piu' recente disponibile.
+      - name: Ripristina cache candele
+        uses: actions/cache@v4
+        with:
+          path: TRADING_V5/cache
+          key: trading-v5-cache-${{ github.run_id }}
+          restore-keys: |
+            trading-v5-cache-
+
+      - name: Esegui
+        env:
+          TF_SET: ${{ inputs.tf_set || 'D1H4H1' }}
+          ENTRY_MODE: ${{ inputs.entry_mode || 'reversal' }}
+          BACKTEST_PRESETS: ${{ inputs.presets }}
+          OUT_DIR: TRADING_V5
+          REQUEST_DELAY: "8"
+        run: python trading_v5.py
+
+      - name: Verifica che il report esista
+        run: |
+          shopt -s nullglob
+          files=(TRADING_V5/*.xlsx)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::Nessun file .xlsx prodotto: controlla il log dello step 'Esegui'."
+            exit 1
+          fi
+          echo "REPORT=${files[-1]}" >> $GITHUB_ENV
+          echo "Report: ${files[-1]}"
+
+      - name: Carica report come artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ env.MODE }}-${{ github.run_id }}
+          path: TRADING_V5/*.xlsx
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Pubblica Release
+        # Release: run manuale con l'opzione spuntata, oppure run mensile pianificato
+        if: ${{ (github.event_name == 'workflow_dispatch' && inputs.pubblica_release) || github.event.schedule == '0 5 1 * *' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v5-${MODE}-$(date -u +%Y%m%d-%H%M)"
+          gh release create "$TAG" "$REPORT" \
+            --title "Trading v5 - ${MODE} $(date -u +%d/%m/%Y) UTC" \
+            --notes "Report generato dal run ${{ github.run_id }}."
+
+      - name: Riepilogo candele in cache
+        if: always()
+        run: |
+          echo "### Candele in cache" >> $GITHUB_STEP_SUMMARY
+          shopt -s nullglob
+          files=(TRADING_V5/cache/*.csv)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "- nessun file in cache (primo avvio oppure cache non ripristinata)" >> $GITHUB_STEP_SUMMARY
+          else
+            for f in "${files[@]}"; do
+              echo "- $(basename "$f"): $(( $(wc -l < "$f") - 1 )) righe" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+      - name: Notifica Telegram
+        if: always()
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TG_CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ESITO_JOB: ${{ job.status }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$TG_TOKEN" ] || [ -z "$TG_CHAT" ]; then
+            echo "Secret Telegram non configurati: notifica saltata."
+            exit 0
+          fi
+          if [ "$ESITO_JOB" = "success" ]; then STATO="completato"; else STATO="NON riuscito ($ESITO_JOB)"; fi
+          if [ -f TRADING_V5/notifica.txt ]; then
+            TESTO="$(cat TRADING_V5/notifica.txt)"
+          else
+            TESTO="Trading v5 - ${RUN_LABEL:-run}"
+          fi
+          TESTO="$TESTO
+          Stato: $STATO
+          Dettagli: $RUN_URL"
+          TESTO="$(printf '%s' "$TESTO" | sed 's/^ *//')"
+          curl -sS -o tg.json -w "sendMessage HTTP %{http_code}\n" \
+            "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TG_CHAT}" \
+            --data-urlencode "text=${TESTO}" \
+            --data-urlencode "disable_web_page_preview=true"
+          grep -q '"ok":true' tg.json || { echo "::warning::Telegram ha rifiutato il messaggio: $(cat tg.json)"; exit 0; }
+          if [ -n "$REPORT" ] && [ -f "$REPORT" ]; then
+            curl -sS -o tg2.json -w "sendDocument HTTP %{http_code}\n" \
+              "https://api.telegram.org/bot${TG_TOKEN}/sendDocument" \
+              -F "chat_id=${TG_CHAT}" -F "document=@${REPORT}"
+            grep -q '"ok":true' tg2.json || echo "::warning::Invio del report non riuscito: $(cat tg2.json)"
+          fi
