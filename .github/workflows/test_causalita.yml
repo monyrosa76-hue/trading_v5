@@ -1,0 +1,27 @@
+# .github/workflows/test_causalita.yml
+# Test anti-lookahead (Modulo 8). Non usa secret, non scarica dati, non tocca la cache
+# né il forward test. Parte da solo a ogni modifica di trading_v5.py o di tests/,
+# oppure a mano da Actions -> "Test causalita" -> Run workflow.
+name: Test causalita
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "trading_v5.py"
+      - "tests/**"
+      - ".github/workflows/test_causalita.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Dipendenze
+        run: pip install --quiet requests pandas numpy
+      - name: Test causalita strategia A (Modulo 8)
+        run: python -I tests/test_causalita_A.py .
