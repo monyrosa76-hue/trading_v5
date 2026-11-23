@@ -1415,7 +1415,10 @@ def run_forward(api_key, out_dir):
     reg = pd.DataFrame(columns=FORWARD_COLS)
     if os.path.exists(FORWARD_FILE):
         try:
-            reg = pd.read_csv(FORWARD_FILE, dtype={"ID": str})
+            # FIX v6.0-dev (23/11/2026): dtype=object. Con colonne tutte vuote pandas le leggeva come
+            # float64 e la chiusura del primo trade (stringa data in "Uscita (Roma)") andava in
+            # TypeError con pandas 3 -> tutti gli scan falliti dal 20/11/2026.
+            reg = pd.read_csv(FORWARD_FILE, dtype=object)
         except Exception as e:
             log(f"(!) registro illeggibile, ne creo uno nuovo: {e}")
     known = set(reg["ID"].astype(str)) if len(reg) else set()
