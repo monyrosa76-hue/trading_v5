@@ -424,6 +424,18 @@ def add_features(df, role):
         df["ema20"] = df.close.ewm(span=20, adjust=False).mean()
     return df
 
+# ---- MODULO 8 · Strategia A (momentum D1, solo acquisti) — indicatori  [v6.0-dev, 23/11/2026]
+# Pre-registrazione: modulo8/preregistrazione_A.md. Ogni colonna alla candela t usa SOLO dati
+# fino a t (verificato da tests/test_causalita_A.py). L'ingresso avviene all'apertura di t+1.
+def features_momentum(df, N, sma_len=200, atr_len=20):
+    df = df.copy()
+    df["sma200"] = df.close.rolling(sma_len, min_periods=sma_len).mean()
+    df["atr20"] = atr_series(df, atr_len)
+    df["max_prev"] = df.high.shift(1).rolling(N, min_periods=N).max()   # massimo da t-N a t-1
+    df["trend_ok"] = df.close > df.sma200                               # NaN -> False
+    df["breakout"] = df.trend_ok & (df.close > df.max_prev)
+    return df
+
 def fractal_flags(high, low, k=2):
     """True dove la candela è un massimo/minimo locale confermato (k candele per lato)."""
     n = len(high)
