@@ -832,6 +832,57 @@ def simulate_momentum(he, i, cls, exit_mode="trail", k_atr=3.0, max_bars=60):
             stop = max(stop, best_close - k_atr * A[j])
     return e, n - 1, (C[-1] - entry) / risk - cost_R, "APERTO A FINE DATI"
 
+# ---- MODULO 8 · Strategia A — trade della strategia e CONTROLLO CASUALE  [v6.0-dev, sessione 4, 24/11/2026]
+# Regola comune: una posizione alla volta per strumento. Dopo l'uscita alla candela j un nuovo
+# ingresso può nascere dalla chiusura di j in poi (i >= j). Ogni trade = (i, e, j, R, motivo).
+def trades_momentum(fm, cls, exit_mode="trail", k_atr=3.0, max_bars=60, entra=None):
+    """Percorre la serie nel tempo; quando è flat entra se entra[i] è vero (default: breakout)."""
+    entra = fm.breakout.values if entra is None else entra
+    out, libero_da = [], 0
+    for i in range(len(fm) - 1):
+        if i < libero_da or not entra[i]:
+            continue
+        r = simulate_momentum(fm, i, cls, exit_mode, k_atr, max_bars)
+        if r is None:
+            continue
+        e, j, R, why = r
+        out.append((i, e, j, R, why))
+        if why == "APERTO A FINE DATI":
+            break
+        libero_da = j
+    return out
+
+def trades_casuali_momentum(fm, cls, n_target, seed, exit_mode="trail", k_atr=3.0, max_bars=60):
+    """Controllo casuale con le STESSE regole della strategia A: stessi giorni ammessi (chiusura >
+    SMA200, indicatori validi), solo acquisti, stesso ingresso a open t+1, stesso stop e stessa uscita,
+    una posizione alla volta. Differisce SOLO per il segnale: invece del breakout, da flat si entra in
+    un giorno ammesso con probabilità p. p è tarato (bisezione, numeri casuali fissi per seme) per
+    ottenere un numero di trade il più vicino possibile a n_target. Percorrere il tempo come la
+    strategia evita di favorire i trade brevi (cosa che accadrebbe scegliendo date a caso e scartando
+    quelle sovrapposte)."""
+    if n_target <= 0:
+        return []
+    u = np.random.default_rng(seed).random(len(fm))
+    ammessi = fm.trend_ok.values & fm.max_prev.notna().values & fm.atr20.notna().values
+    lo, hi, best = 0.0, 1.0, None
+    for _ in range(25):
+        p = (lo + hi) / 2
+        tr = trades_momentum(fm, cls, exit_mode, k_atr, max_bars, entra=ammessi & (u < p))
+        if best is None or abs(len(tr) - n_target) < abs(len(best) - n_target):
+            best = tr
+        if len(tr) == n_target:
+            break
+        lo, hi = (p, hi) if len(tr) < n_target else (lo, p)
+    return best
+
+def t_welch(a, b):
+    """t di Welch per la differenza delle medie (a - b). Criterio pre-registrato: t >= 2."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    if len(a) < 2 or len(b) < 2:
+        return np.nan
+    se = np.sqrt(a.var(ddof=1) / len(a) + b.var(ddof=1) / len(b))
+    return (a.mean() - b.mean()) / se if se > 0 else np.nan
+
 # =============================================================================
 # 10. BACKTEST
 # =============================================================================
