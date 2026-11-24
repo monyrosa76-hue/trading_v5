@@ -796,6 +796,42 @@ def simulate(he, i, sig, P, cls, time_stop_hours):
                 return j, d * (C[j] - entry) / risk - cost_R, "WEEKEND"
     return len(he) - 1, d * (C[-1] - entry) / risk - cost_R, "APERTO A FINE DATI"
 
+# ---- MODULO 8 · Strategia A — simulazione  [v6.0-dev, sessione 3, 23/11/2026]
+# Regole (modulo8/preregistrazione_A.md):
+#   segnale alla CHIUSURA della candela i -> ingresso all'APERTURA di i+1 (prezzo noto solo allora)
+#   1R = k_atr x ATR(20) della candela i; stop iniziale = ingresso - 1R
+#   per ogni candela j dall'ingresso: 1) gap: apertura <= stop -> uscita all'apertura
+#                                     2) minimo <= stop        -> uscita allo stop
+#                                     3) solo DOPO, in chiusura, si aggiorna lo stop (vale da j+1)
+#   exit_mode="trail": stop = max(stop, chiusura più alta dall'ingresso - k_atr x ATR(20) di j)
+#   exit_mode="time" : stop fisso; uscita alla chiusura della seduta max_bars
+#                      (seduta 1 = candela d'ingresso i+1, quindi uscita a i+max_bars)
+# Ritorna (e, j, R, motivo) oppure None se non c'è una candela i+1 o l'ATR non è valido.
+# `simulate` (forward test e preset v5) resta invariata.
+def simulate_momentum(he, i, cls, exit_mode="trail", k_atr=3.0, max_bars=60):
+    n, e = len(he), i + 1
+    if e >= n:
+        return None
+    O, H, L, C, A = (he[c].values for c in ("open", "high", "low", "close", "atr20"))
+    entry, risk = float(O[e]), k_atr * float(A[i])
+    if not (np.isfinite(risk) and risk > 0 and np.isfinite(entry)):
+        return None
+    stop0 = stop = entry - risk
+    cost_R = SPREAD_PCT[cls] / 100 * entry / risk
+    best_close = -np.inf
+    for j in range(e, n):
+        why = "SL" if stop == stop0 else "TRAIL"
+        if O[j] <= stop:                                   # gap sotto lo stop
+            return e, j, (O[j] - entry) / risk - cost_R, why + " (gap)"
+        if L[j] <= stop:
+            return e, j, (stop - entry) / risk - cost_R, why
+        if exit_mode == "time" and j - e + 1 >= max_bars:
+            return e, j, (C[j] - entry) / risk - cost_R, "TIME"
+        if exit_mode == "trail":                           # aggiornamento in chiusura, vale da j+1
+            best_close = max(best_close, C[j])
+            stop = max(stop, best_close - k_atr * A[j])
+    return e, n - 1, (C[-1] - entry) / risk - cost_R, "APERTO A FINE DATI"
+
 # =============================================================================
 # 10. BACKTEST
 # =============================================================================
@@ -1367,6 +1403,38 @@ FORWARD_COLS = ["ID", "Preset", "Strumento", "Direzione", "Ingresso (UTC)", "Ing
 # I numeri del 06/11/2026 (+0,162R su 73 trade) erano calcolati con il lookahead e NON valgono.
 FORWARD_REF = os.environ.get("FORWARD_REF", "").strip() or "ultimo backtest v5.5, foglio Esito, Azioni USA"
 
+# ---- Foglio "Segnali operativi" (v6.0-dev, 23/11/2026) -------------------------------------------
+# Preset VALIDATI = 4/4 condizioni nell'ultimo backtest. Si aggiungono SOLO a mano, con un commit,
+# dopo aver verificato il foglio Esito. Finché l'insieme è vuoto, nessun segnale è operativo.
+PRESET_VALIDATI = set()          # es. {"A1_momentum_N50"}
+CAPITALE_DEMO   = float(os.environ.get("CAPITALE_DEMO", "").strip() or 10000)   # $ del conto (demo)
+RISCHIO_PCT     = float(os.environ.get("RISCHIO_PCT", "").strip() or 1.0)       # % del conto rischiata per trade
+
+def tabella_segnali(reg, new_ids, closed_ids):
+    """Una riga per ogni posizione da gestire: nuove, aperte, chiuse in questo run."""
+    rows = []
+    for _, r in reg.iterrows():
+        rid, stato = str(r["ID"]), str(r.get("Stato"))
+        if not (stato == "APERTO" or rid in new_ids or rid in closed_ids):
+            continue
+        entry, sl, tp = (pd.to_numeric(r[c], errors="coerce") for c in ("Entry", "SL", "TP"))
+        stop_frac = abs(entry - sl) / entry if entry and np.isfinite(entry) and np.isfinite(sl) else np.nan
+        importo = CAPITALE_DEMO * RISCHIO_PCT / 100 / stop_frac if stop_frac and np.isfinite(stop_frac) else np.nan
+        if rid in closed_ids:
+            azione = f"CHIUSA ({r.get('Uscita per')} il {r.get('Uscita (Roma)')}): verifica che eToro l'abbia chiusa"
+        elif rid in new_ids:
+            azione = "APRI: compra al mercato, poi imposta SL e TP indicati (SL e TP NON si ricalcolano)"
+        else:
+            azione = "Nessuna: SL e TP già impostati"
+        rows.append({"Prodotto": r["Strumento"], "Direzione": r["Direzione"], "Stato": stato,
+                     "Entrata": round(float(entry), 2), "SL (oggi)": round(float(sl), 2),
+                     "TP": round(float(tp), 2) if np.isfinite(tp) else "— (nessuno)",
+                     "Stop %": round(stop_frac * 100, 2) if np.isfinite(stop_frac) else None,
+                     f"Importo con rischio {RISCHIO_PCT:g}% di {CAPITALE_DEMO:,.0f} $": round(importo, 0) if np.isfinite(importo) else None,
+                     "Rischio $": round(CAPITALE_DEMO * RISCHIO_PCT / 100, 0),
+                     "Azione richiesta": azione, "Preset": r["Preset"], "Segnale del (Roma)": r["Ingresso (Roma)"]})
+    return pd.DataFrame(rows)
+
 def _fmt_r(x):
     return "n.d." if x is None or pd.isna(x) else f"{x:+.3f}R"
 
@@ -1483,7 +1551,26 @@ def run_forward(api_key, out_dir):
 
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"Forward_v5_{now_rome:%Y%m%d_%H%M}.xlsx")
+    tab = tabella_segnali(reg, {r["ID"] for r in new_rows}, {r["ID"] for r in closed_now})
+    if len(tab):
+        oper = tab[tab.Preset.isin(PRESET_VALIDATI)]
+        oss = tab[~tab.Preset.isin(PRESET_VALIDATI)]
+    else:
+        oper, oss = tab, tab
+    testa = [f"Preset validati: {', '.join(sorted(PRESET_VALIDATI)) or 'NESSUNO'}",
+             "NESSUN PRODOTTO VALIDATO: nessuna operazione reale." if not len(oper)
+             else f"{len(oper)} posizioni operative: segui la colonna 'Azione richiesta'.",
+             f"Dimensionamento: rischio {RISCHIO_PCT:g}% di {CAPITALE_DEMO:,.0f} $ per trade "
+             "(importo = rischio $ / Stop %). Ricalcola l'importo con il prezzo reale; SL e TP restano quelli indicati.",
+             f"Aggiornato: {now_rome:%Y-%m-%d %H:%M} (Roma)"]
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
+        pd.DataFrame({"Segnali operativi": testa}).to_excel(xw, sheet_name="Segnali operativi", index=False)
+        if len(oper):
+            oper.to_excel(xw, sheet_name="Segnali operativi", index=False, startrow=len(testa) + 2)
+        pd.DataFrame({"OSSERVAZIONE - NON operativo (solo esercizio in demo)": []}) \
+            .to_excel(xw, sheet_name="Osservazione (demo)", index=False)
+        (oss if len(oss) else pd.DataFrame({"Nota": ["Nessuna posizione aperta, nuova o chiusa in questo run."]})) \
+            .to_excel(xw, sheet_name="Osservazione (demo)", index=False, startrow=2)
         pd.DataFrame([summ]).T.reset_index().rename(columns={"index": "Voce", 0: "Valore"}) \
             .to_excel(xw, sheet_name="Riepilogo forward", index=False)
         pd.DataFrame(new_rows, columns=FORWARD_COLS).to_excel(xw, sheet_name="Nuovi in questo run", index=False)
@@ -1500,9 +1587,11 @@ def run_forward(api_key, out_dir):
         for ws in xw.book.worksheets:
             for col in ws.columns:
                 ws.column_dimensions[col[0].column_letter].width = 22
+        xw.book.active = 0
     log(f"File: {path}")
 
-    righe = [f"Forward test {preset} ({', '.join(CLASS_LABEL.get(c, c) for c in FORWARD_CLASSES)})",
+    righe = [f"Prodotti validati: {len(oper) if len(oper) else 'NESSUNO'} (foglio 'Segnali operativi')",
+             f"Forward test {preset} ({', '.join(CLASS_LABEL.get(c, c) for c in FORWARD_CLASSES)})",
              f"Strumenti con dati: {len(data)} su {len(universe)}"]
     for r in new_rows:
         righe.append(f"NUOVO: {r['Strumento']} {r['Direzione']} il {r['Ingresso (Roma)']} | entry {r['Entry']:.2f} "
@@ -1515,7 +1604,8 @@ def run_forward(api_key, out_dir):
         righe.append("Nessun nuovo trade e nessuna chiusura.")
     righe.append(f"Totale: {len(Rs)} chiusi, R medio {_fmt_r(summ['R medio'])}, aperti {n_open}. "
                  f"Riferimento {FORWARD_REF}.")
-    righe.append("Osservazione, NON operatività: preset non validato.")
+    righe.append("Operativo: preset validato, vedi foglio 'Segnali operativi'." if preset in PRESET_VALIDATI
+                 else "Osservazione, NON operatività: preset non validato.")
     write_notice(out_dir, righe)
 
 def main():
