@@ -1659,6 +1659,199 @@ def run_forward(api_key, out_dir):
                  else "Osservazione, NON operatività: preset non validato.")
     write_notice(out_dir, righe)
 
+# =============================================================================
+# 13. MODULO 8 · BACKTEST STRATEGIA A (MODE=backtest_A)   [v6.0-dev, sessione 5, 24/11/2026]
+# =============================================================================
+# Regole: modulo8/preregistrazione_A.md (commit 81b89d6) + precisazioni del 23–24/11/2026.
+# Precisazione dichiarata prima del primo run: i trade ancora aperti a fine dati sono elencati ma
+# NON entrano nelle statistiche, né per la strategia né per il controllo casuale.
+A_VARIANTI = {   # nome: (N, uscita)
+    "A1_momentum_N50":        (50, "trail"),
+    "A2_momentum_N20":        (20, "trail"),
+    "A3_momentum_N50_time60": (50, "time"),
+}
+A_CLASSI   = ("stock_us", "stock_eu", "index")          # universo operativo (forex e oro esclusi)
+A_AMBITI   = {"Tutti gli strumenti operativi": A_CLASSI, "Azioni USA": ("stock_us",)}
+
+def _maxdd_R(R):
+    """Drawdown massimo della somma cumulata degli R (in R), in ordine di uscita."""
+    eq = np.cumsum(R)
+    return float((np.maximum.accumulate(np.r_[0.0, eq])[1:] - eq).max()) if len(eq) else 0.0
+
+def _max_perdite_consecutive(R):
+    m = c = 0
+    for r in R:
+        c = c + 1 if r <= 0 else 0; m = max(m, c)
+    return m
+
+def _bh(series_by_name, names):
+    """Buy-and-hold a pesi uguali, ribilanciato ogni giorno tra gli strumenti disponibili."""
+    rets = []
+    for n in names:
+        d = series_by_name[n].set_index("time").close
+        rets.append(d.pct_change().rename(n))
+    if not rets:
+        return None
+    r = pd.concat(rets, axis=1).sort_index().mean(axis=1, skipna=True).dropna()
+    eq = (1 + r).cumprod()
+    anni = (r.index[-1] - r.index[0]).days / 365.25
+    return {"Dal": f"{r.index[0]:%Y-%m-%d}", "Al": f"{r.index[-1]:%Y-%m-%d}",
+            "CAGR %": round((eq.iloc[-1] ** (1 / anni) - 1) * 100, 2) if anni > 0 else None,
+            "Drawdown massimo %": round(float((1 - eq / eq.cummax()).max()) * 100, 1),
+            "Peggior anno %": round(float(r.groupby(r.index.year).apply(lambda x: (1 + x).prod() - 1).min()) * 100, 1)}
+
+def run_backtest_A(api_key, out_dir):
+    now_utc = pd.Timestamp.now(tz="UTC"); now_rome = now_utc.tz_convert(ROME)
+    cache = os.path.join(out_dir, "cache")
+    universe = [n for n, v in INSTRUMENTS.items() if v[2] in A_CLASSI]
+    log("=" * 70)
+    log(f"  BACKTEST STRATEGIA A (Modulo 8) — {now_rome:%Y-%m-%d %H:%M} (Roma)")
+    log(f"  Varianti: {', '.join(A_VARIANTI)} | strumenti: {len(universe)} | timeframe: 1day")
+    log("=" * 70)
+
+    data, dataload = {}, []
+    for name in universe:
+        df, msg = load_series(name, "1day", 5000, api_key, cache, now_utc)
+        ok_ = ohlc_valid(df, 300)
+        dataload.append({"Strumento": name, "Classe": CLASS_LABEL[INSTRUMENTS[name][2]],
+                         "Candele": 0 if df is None else len(df), "Messaggio": msg,
+                         "Dal": "" if df is None or not len(df) else f"{df.time.iloc[0]:%Y-%m-%d}",
+                         "Al": "" if df is None or not len(df) else f"{df.time.iloc[-1]:%Y-%m-%d}",
+                         "Usato": "sì" if ok_ else "NO"})
+        if ok_:
+            data[name] = df
+        log(f"  {name:24s} {'ok' if ok_ else 'NON UTILIZZABILE'} ({msg}) candele {0 if df is None else len(df)}")
+
+    # taglio OOS per classe: 70% del periodo coperto dai dati di quella classe
+    cut = {}
+    for c in A_CLASSI:
+        ds = [data[n] for n in data if INSTRUMENTS[n][2] == c]
+        if ds:
+            t0 = min(d.time.iloc[0] for d in ds); t1 = max(d.time.iloc[-1] for d in ds)
+            cut[c] = t0 + (t1 - t0) * OOS_SPLIT
+
+    rows, aperti = [], []
+    for var, (N, mode) in A_VARIANTI.items():
+        for name, df in data.items():
+            cls = INSTRUMENTS[name][2]
+            fm = features_momentum(df, N)
+            st = trades_momentum(fm, cls, mode)
+            n_chiusi = sum(1 for t in st if t[4] != "APERTO A FINE DATI")
+            seed = zlib.crc32(f"{var}|{name}".encode()) + RANDOM_SEED
+            ca = trades_casuali_momentum(fm, cls, len(st), seed, exit_mode=mode)
+            for tipo, lst in (("strategia", st), ("casuale", ca)):
+                for (i, e, j, R, why) in lst:
+                    row = {"Variante": var, "Tipo": tipo, "Strumento": name, "Classe": cls,
+                           "Segnale": f"{fm.time.iloc[i]:%Y-%m-%d}", "Ingresso": f"{fm.time.iloc[e]:%Y-%m-%d}",
+                           "Prezzo ingresso": round(float(fm.open.iloc[e]), 4),
+                           "Stop iniziale": round(float(fm.open.iloc[e] - 3.0 * fm.atr20.iloc[i]), 4),
+                           "Uscita": f"{fm.time.iloc[j]:%Y-%m-%d}", "Sedute": j - e + 1,
+                           "R": round(float(R), 4), "Motivo": why,
+                           "OOS": bool(cls in cut and fm.time.iloc[e] >= cut[cls]), "_t": fm.time.iloc[j]}
+                    (aperti if why == "APERTO A FINE DATI" else rows).append(row)
+            log(f"  {var:24s} {name:24s} strategia {n_chiusi:4d} | casuale {len(ca):4d}")
+    T = pd.DataFrame(rows)
+
+    # ---- verdetto
+    esito, per_cls, per_sym = [], [], []
+    for var in A_VARIANTI:
+        for amb, classi in A_AMBITI.items():
+            s = T[(T.Variante == var) & (T.Tipo == "strategia") & T.Classe.isin(classi)].sort_values("_t")
+            c = T[(T.Variante == var) & (T.Tipo == "casuale") & T.Classe.isin(classi)]
+            Rs, Rc = s.R.values, c.R.values
+            n, m, mc = len(Rs), (Rs.mean() if len(Rs) else np.nan), (Rc.mean() if len(Rc) else np.nan)
+            t = t_welch(Rs, Rc); oos = s[s.OOS].R
+            c1, c2 = n >= MIN_TRADES_OK, bool(n and m > 0)
+            c3, c4 = bool(np.isfinite(t) and t >= 2), bool(len(oos) and oos.mean() > 0)
+            sc = int(c1) + int(c2) + int(c3) + int(c4)
+            anni = max((s._t.max() - s._t.min()).days / 365.25, 1e-9) if n else np.nan
+            esito.append({"Variante": var, "Ambito": amb, "Trade": n,
+                          "1) ≥100 trade": "✅" if c1 else "❌",
+                          "Expectancy R": round(m, 3) if n else None, "2) > 0": "✅" if c2 else "❌",
+                          "Casuale stesse regole R": round(mc, 3) if len(Rc) else None,
+                          "Differenza R": round(m - mc, 3) if n and len(Rc) else None,
+                          "t": round(t, 2) if np.isfinite(t) else None, "3) t ≥ 2": "✅" if c3 else "❌",
+                          "OOS R": round(oos.mean(), 3) if len(oos) else None, "OOS trade": len(oos),
+                          "4) OOS > 0": "✅" if c4 else "❌", "Condizioni": f"{sc}/4",
+                          "VERDETTO": "VALIDATA" if sc == 4 else "NON validata",
+                          "Vincenti %": round((Rs > 0).mean() * 100, 1) if n else None,
+                          "Guadagno medio R": round(Rs[Rs > 0].mean(), 2) if (Rs > 0).any() else None,
+                          "Perdita media R": round(Rs[Rs <= 0].mean(), 2) if (Rs <= 0).any() else None,
+                          "Max perdite consecutive": _max_perdite_consecutive(Rs),
+                          "Drawdown max (R, somma)": round(_maxdd_R(Rs), 1),
+                          "Sedute medie": round(s.Sedute.mean(), 1) if n else None,
+                          "Trade/anno": round(n / anni, 1) if n else None})
+        for c_ in A_CLASSI:
+            s = T[(T.Variante == var) & (T.Tipo == "strategia") & (T.Classe == c_)]
+            c = T[(T.Variante == var) & (T.Tipo == "casuale") & (T.Classe == c_)]
+            if len(s):
+                per_cls.append({"Variante": var, "Classe": CLASS_LABEL[c_], "Trade": len(s),
+                                "Expectancy R": round(s.R.mean(), 3), "Casuale R": round(c.R.mean(), 3) if len(c) else None,
+                                "t": round(t_welch(s.R, c.R), 2) if len(c) > 1 and len(s) > 1 else None,
+                                "OOS R": round(s[s.OOS].R.mean(), 3) if s.OOS.any() else None,
+                                "OOS trade": int(s.OOS.sum()), "Taglio OOS dal": f"{cut[c_]:%Y-%m-%d}"})
+        for name in data:
+            s = T[(T.Variante == var) & (T.Tipo == "strategia") & (T.Strumento == name)]
+            c = T[(T.Variante == var) & (T.Tipo == "casuale") & (T.Strumento == name)]
+            per_sym.append({"Variante": var, "Strumento": name, "Trade": len(s),
+                            "Expectancy R": round(s.R.mean(), 3) if len(s) else None,
+                            "Casuale R": round(c.R.mean(), 3) if len(c) else None,
+                            "Somma R": round(s.R.sum(), 1) if len(s) else None,
+                            "Vincenti %": round((s.R > 0).mean() * 100, 1) if len(s) else None})
+    E = pd.DataFrame(esito)
+    bh = []
+    for amb, classi in A_AMBITI.items():
+        r = _bh(data, [n for n in data if INSTRUMENTS[n][2] in classi])
+        if r:
+            bh.append({"Ambito": amb, **r})
+
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"Backtest_A_{now_rome:%Y%m%d_%H%M}.xlsx")
+    valid = E[E.VERDETTO == "VALIDATA"]
+    testa = [f"BACKTEST STRATEGIA A — {now_rome:%Y-%m-%d %H:%M} (Roma) — strumenti con dati: {len(data)} su {len(universe)}",
+             "Regole: modulo8/preregistrazione_A.md (commit 81b89d6). Verdetto = 4 condizioni su 4.",
+             ("VARIANTI VALIDATE: " + ", ".join(f"{a} ({b})" for a, b in zip(valid.Variante, valid.Ambito)))
+             if len(valid) else "NESSUNA VARIANTE VALIDATA: la strategia A non mostra un vantaggio misurabile.",
+             "Statistiche in R (1R = 3 × ATR20 all'ingresso), costi inclusi. Trade aperti a fine dati esclusi.",
+             "Il drawdown in R è la somma dei trade in ordine di uscita, come se ogni trade rischiasse lo stesso importo "
+             "(con più posizioni aperte insieme il drawdown reale del conto può essere diverso)."]
+    with pd.ExcelWriter(path, engine="openpyxl") as xw:
+        pd.DataFrame({"Esito A": testa}).to_excel(xw, sheet_name="Esito A", index=False)
+        E.to_excel(xw, sheet_name="Esito A", index=False, startrow=len(testa) + 2)
+        pd.DataFrame(bh).to_excel(xw, sheet_name="Esito A", index=False, startrow=len(testa) + len(E) + 6)
+        pd.DataFrame(per_cls).to_excel(xw, sheet_name="Per classe", index=False)
+        pd.DataFrame(per_sym).to_excel(xw, sheet_name="Per strumento", index=False)
+        T[T.Tipo == "strategia"].drop(columns="_t").to_excel(xw, sheet_name="Trade strategia", index=False)
+        T[T.Tipo == "casuale"].drop(columns="_t").to_excel(xw, sheet_name="Trade casuali", index=False)
+        pd.DataFrame(aperti or [{"Nota": "nessuno"}]).drop(columns="_t", errors="ignore") \
+            .to_excel(xw, sheet_name="Aperti a fine dati", index=False)
+        pd.DataFrame(dataload).to_excel(xw, sheet_name="Dati caricati", index=False)
+        pd.DataFrame({"Nota": [
+            "1) ≥100 trade chiusi; 2) expectancy > 0 dopo i costi; 3) differenza col controllo casuale con le stesse "
+            "regole con t di Welch ≥ 2; 4) expectancy > 0 sui trade con ingresso nell'ultimo 30% del periodo della propria classe.",
+            "Controllo casuale: stessi giorni ammessi (chiusura > SMA200), ingresso a open t+1, stesso stop e stessa uscita, "
+            "una posizione alla volta, stesso numero di trade; cambia solo il segnale (casuale invece del breakout).",
+            "Il buy-and-hold (in fondo al foglio Esito A) è un confronto informativo in %, non in R: non è una condizione.",
+            "Bias di sopravvivenza: l'universo è scelto oggi. Il controllo casuale lo neutralizza in parte, il buy-and-hold no.",
+            "Una variante NON validata non si 'aggiusta' cambiando i parametri: regola di arresto della pre-registrazione."]}) \
+            .to_excel(xw, sheet_name="Come leggere", index=False)
+        for ws in xw.book.worksheets:
+            for col in ws.columns:
+                ws.column_dimensions[col[0].column_letter].width = 20
+        xw.book.active = 0
+    log(f"\nFile: {path}")
+
+    righe = [f"Backtest strategia A — strumenti {len(data)}/{len(universe)}"]
+    for _, r in E.iterrows():
+        righe.append(f"{r.Variante} | {r.Ambito}: {r.Trade} trade, {_fmt_r(r['Expectancy R'])} vs casuale "
+                     f"{_fmt_r(r['Casuale stesse regole R'])}, t={r.t}, OOS {_fmt_r(r['OOS R'])} -> {r.Condizioni} {r.VERDETTO}")
+    for b in bh:
+        righe.append(f"Buy-and-hold {b['Ambito']}: CAGR {b['CAGR %']}%, DD max {b['Drawdown massimo %']}%")
+    righe.append("VALIDATE: " + (", ".join(valid.Variante + " (" + valid.Ambito + ")") if len(valid) else "NESSUNA"))
+    write_notice(out_dir, righe)
+    for l in righe:
+        log(l)
+
 def main():
     api_key = get_api_key(); out_dir = get_out_dir()
     cache_files = [f for f in os.listdir(os.path.join(out_dir, "cache")) if f.endswith(".csv")]
@@ -1672,6 +1865,8 @@ def main():
                 "Il nome del secret deve coincidere con quello indicato nel file del workflow.\n"
                 "Attenzione: un valore inserito nella scheda 'Variables' NON viene letto come secret.")
         log("(!) API key assente: proseguo con i soli dati già in cache.")
+    if MODE == "backtest_A":
+        run_backtest_A(api_key, out_dir); return
     if MODE == "scan":
         # v5.5: lo scanner è il forward test del preset scelto; SCAN_PRESET=legacy -> vecchio scanner
         (run_scan if os.environ.get("SCAN_PRESET", "").strip() == "legacy" else run_forward)(api_key, out_dir)
