@@ -14,6 +14,10 @@
 #    (prima la condizione "!= false" era ambigua nei run pianificati)
 #  - concurrency: due run non partono mai insieme (stessa cache, stessi crediti API)
 #
+# MODIFICHE v6.0-dev (24/11/2026):
+#  - nuova opzione manuale mode=backtest_A: backtest della strategia A del Modulo 8 (solo D1,
+#    18 chiamate API). Pianificazione, scan e forward test invariati.
+#
 # MODIFICHE v5.5 (06/11/2026):
 #  - mode=scan esegue il FORWARD TEST (preset D1H4H1_zone_H123 sulle azioni USA) e salva
 #    il registro forward/registro_forward.csv nel repository con un commit automatico.
@@ -35,10 +39,10 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "scan oppure backtest"
+        description: "scan, backtest (v5) oppure backtest_A (Modulo 8, strategia A)"
         default: "backtest"
         type: choice
-        options: [backtest, scan]
+        options: [backtest, scan, backtest_A]
       tf_set:
         description: "Set timeframe per lo scanner"
         default: "D1H4H1"
