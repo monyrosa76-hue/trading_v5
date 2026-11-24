@@ -16,6 +16,12 @@ Il test controlla:
   6. causalità dell'esecuzione: l'uscita alla candela j si decide con le sole candele fino a j;
   7. CONTROLLO NEGATIVO: una simulazione che aggiorna lo stop PRIMA di controllare il minimo
      della stessa candela (lookahead d'esecuzione) deve essere scoperta.
+  [sessione 4 — controllo casuale con le stesse regole]
+  8. il controllo rispetta le stesse regole: stessi giorni ammessi, una posizione alla volta,
+     stesso numero di trade, risultato ripetibile con lo stesso seme;
+  9. FALSI POSITIVI: su serie SENZA vantaggio del breakout (ma con trend rialzista, come le azioni)
+     il confronto strategia vs casuale deve dare t >= 2 raramente;
+ 10. POTENZA: su serie in cui il breakout HA un vantaggio piantato, deve dare t >= 2.
 
 Uso:   python -I tests/test_causalita_A.py <cartella che contiene trading_v5.py>
 Esito: exit code 0 = tutto CAUSALE e controllo negativo scoperto; 1 = problema.
@@ -160,6 +166,72 @@ def sim_sbagliata(he, i, k=3.0):
 caught = sim_sbagliata(d, 0) != (1, 2)
 print(f"{'CONTROLLO NEGATIVO (esecuzione)':34s} -> {'SCOPERTO (il test funziona)' if caught else 'NON SCOPERTO: TEST NON AFFIDABILE'}")
 ok &= caught
+
+
+# ============================ SESSIONE 4: CONTROLLO CASUALE ============================
+def serie(seed, m=2500, drift=0.0004, vol=0.015, edge=0.0, N=50, giorni_edge=20):
+    """Serie D1 sintetica. Se edge > 0, dopo ogni breakout (calcolato in modo causale) la deriva
+    aumenta di 'edge' per 'giorni_edge' sedute: è il vantaggio che il test deve saper vedere."""
+    r = np.random.default_rng(seed)
+    c = np.empty(m); h = np.empty(m); l = np.empty(m); o = np.empty(m)
+    c[0] = o[0] = h[0] = l[0] = 100.0; boost = pausa = 0
+    for t in range(1, m):
+        mu = drift + (edge if boost > 0 else 0.0)
+        if boost > 0:
+            boost -= 1; pausa = 30 if boost == 0 else 0          # dopo la spinta 30 sedute senza nuove spinte
+        else:
+            pausa = max(0, pausa - 1)
+        o[t] = c[t - 1] * (1 + r.normal(0, vol * 0.25))
+        c[t] = o[t] * np.exp(r.normal(mu, vol))
+        h[t] = max(o[t], c[t]) * (1 + abs(r.normal(0, vol * 0.4)))
+        l[t] = min(o[t], c[t]) * (1 - abs(r.normal(0, vol * 0.4)))
+        if edge > 0 and boost == 0 and pausa == 0 and t > N and c[t] > h[t - N:t].max():
+            boost = giorni_edge                                   # spinta SOLO dopo un breakout
+    d = pd.DataFrame({"time": pd.bdate_range("2010-01-01", periods=m, tz="UTC"),
+                      "open": o, "high": h, "low": l, "close": c})
+    return tv5.features_momentum(d, N)
+
+def confronto(seeds, edge, mode="trail"):
+    Rs, Rc = [], []
+    for sd in seeds:
+        fm_ = serie(sd, edge=edge)
+        st = tv5.trades_momentum(fm_, CLS, mode)
+        ca = tv5.trades_casuali_momentum(fm_, CLS, len(st), seed=1000 + sd, exit_mode=mode)
+        Rs += [t[3] for t in st]; Rc += [t[3] for t in ca]
+    return np.mean(Rs), np.mean(Rc), tv5.t_welch(Rs, Rc), len(Rs), len(Rc)
+
+# 8. stesse regole
+fm8 = serie(3)
+st8 = tv5.trades_momentum(fm8, CLS)
+ca8 = tv5.trades_casuali_momentum(fm8, CLS, len(st8), seed=99)
+ca8b = tv5.trades_casuali_momentum(fm8, CLS, len(st8), seed=99)
+amm = fm8.trend_ok.values & fm8.max_prev.notna().values
+regole = (all(amm[i] for i, *_ in ca8)                                         # giorni ammessi
+          and all(ca8[k + 1][0] >= ca8[k][2] for k in range(len(ca8) - 1))      # una alla volta
+          and abs(len(ca8) - len(st8)) <= max(1, round(0.05 * len(st8)))        # stesso numero
+          and ca8 == ca8b                                                        # ripetibile
+          and all(e == i + 1 for i, e, *_ in ca8))                               # ingresso a open t+1
+print(f"{'controllo: stesse regole':34s} {'OK' if regole else 'ERRATO'}   "
+      f"(strategia {len(st8)} trade, casuale {len(ca8)} trade)")
+ok &= regole
+
+# 9. falsi positivi: 30 universi da 8 strumenti senza vantaggio
+fp = 0; ts = []
+for k in range(30):
+    _, _, t, _, _ = confronto(range(100 + 8 * k, 108 + 8 * k), edge=0.0)
+    ts.append(t); fp += t >= 2
+print(f"{'FALSI POSITIVI (nessun vantaggio)':34s} t >= 2 in {fp}/30 universi "
+      f"(t medio {np.mean(ts):+.2f}) -> {'OK' if fp <= 3 else 'TROPPI'}")
+ok &= fp <= 3
+
+# 10. potenza: vantaggio piantato (spinta di EDGE al giorno per 20 sedute dopo un breakout)
+EDGE = 0.004
+for mode in ("trail", "time"):
+    ms, mc, t, ns, nc = confronto(range(500, 512), edge=EDGE, mode=mode)
+    good = t >= 2
+    print(f"{'POTENZA vantaggio piantato (' + mode + ')':34s} strategia {ms:+.3f}R ({ns}) vs casuale "
+          f"{mc:+.3f}R ({nc}) t={t:+.2f} -> {'SCOPERTO' if good else 'NON SCOPERTO'}")
+    ok &= good
 
 print("\nESITO:", "SUPERATO" if ok else "NON SUPERATO")
 sys.exit(0 if ok else 1)
